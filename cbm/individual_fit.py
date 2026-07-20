@@ -15,7 +15,7 @@ import warnings
 import time
 
 from .map_estimation import optimize_map, log_posterior
-from .optimization import BFGSOptimizer, Config
+from .optimization_legacy import BFGSOptimizer, Config
 
 
 @dataclass

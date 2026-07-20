@@ -1,5 +1,5 @@
 import numpy as np
-from cbm.individual_fit import individual_fit
+from code.methods.utils.cbm_python.cbm.individual_fit import individual_fit
 import pickle
 from pathlib import Path
 

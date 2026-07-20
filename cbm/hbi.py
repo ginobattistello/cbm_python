@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple, Union
 import numpy as np
 from scipy.special import psi, gammaln
 
-from cbm.hbi_exceedance import cbm_hbi_exceedance
+from .hbi_exceedance import cbm_hbi_exceedance
 from .hbi_types import (
     IndividualPosterior,
     ProgressChange,

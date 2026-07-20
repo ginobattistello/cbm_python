@@ -2,10 +2,10 @@ import numpy as np
 import pickle
 from pathlib import Path
 
-from cbm.hbi import hbi_main, hbi_null
-from cbm.individual_fit import individual_fit
-from cbm.model_selection import bms
-from cbm.optimization import Config
+from code.methods.utils.cbm_python.cbm.hbi import hbi_main, hbi_null
+from code.methods.utils.cbm_python.cbm.individual_fit import individual_fit
+from code.methods.utils.cbm_python.cbm.model_selection import bms
+from code.methods.utils.cbm_python.cbm.optimization import Config
 
 # Paths
 BASE_DIR = Path(__file__).parent

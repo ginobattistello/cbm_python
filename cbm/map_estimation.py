@@ -6,7 +6,7 @@ MAP (Maximum A Posteriori) estimation using quadratic (Laplace) approximation.
 import numpy as np
 from typing import Callable, Any, Tuple
 
-from .optimization import BFGSOptimizer, Config
+from .optimization_legacy import BFGSOptimizer, Config
 
 
 def log_posterior(parameters: np.ndarray,
