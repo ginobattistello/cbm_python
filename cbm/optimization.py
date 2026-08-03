@@ -15,12 +15,18 @@ OVERVIEW OF MODIFICATIONS
   3  _newton_polish        — new VBA-style Gauss-Newton refinement
   4  optimize              — defensive wrapping, single-pass,
                              Newton polish, VBA convergence flag
+  5  compute_hessian       — VBA-style Gauss-Newton curvature,
+                             opt-in via `trial_func` (replaces Mod 2
+                             for models that expose per-trial log-lik)
 ─────────────────────────────────────────────────────────────────
 Modifications 2-4 are interdependent and should be applied together:
   • Mod 2 guarantees a positive-definite Hessian for Mod 3's Newton step
   • Mod 3 provides the refinement used by Mod 4's optimize loop
   • Mod 4's flag logic relies on Mods 2-3 (Hessian always PD, ΔF
     convergence replaces gradient-norm check)
+Modification 5 supersedes Modification 2 whenever the caller supplies
+`trial_func`; Mod 2 remains the fallback for models that cannot expose
+a per-trial decomposition (see Mod 5's docstring below).
 ─────────────────────────────────────────────────────────────────
 """
 
@@ -144,6 +150,9 @@ class OptimizationResult:
         is_hess_pos: Whether Hessian is positive definite
         abs_g: Mean absolute gradient at optimum
         x_init: Initial point used for the best run
+        hess_method: Which curvature `hess` came from — "gauss_newton"
+              (Mod 5, VBA-style, PD by construction) or
+              "finite_diff_clipped" (Mod 2 fallback, eigenvalue-floored)
     """
     x: np.ndarray
     f: float
@@ -156,6 +165,7 @@ class OptimizationResult:
     is_hess_pos: bool
     abs_g: float
     x_init: np.ndarray
+    hess_method: str = "finite_diff_clipped"
 
 
 class BFGSOptimizer:
@@ -225,18 +235,29 @@ class BFGSOptimizer:
     def compute_hessian(self,
                         func: Callable[[np.ndarray], float],
                         x: np.ndarray,
-                        epsilon: float = 1e-5) -> np.ndarray:
+                        epsilon: float = 1e-5,
+                        trial_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+                        prior_precision: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Compute Hessian matrix via finite differences.
+        Compute the curvature used for the Newton step and (at the MAP)
+        for the Laplace evidence.
 
         Args:
-            func: Objective function
-            x: Point at which to compute Hessian
-            epsilon: Step size for finite differences
+            func: Objective function (negative log posterior)
+            x: Point at which to compute the curvature
+            epsilon: Step size for the Mod 2 fallback (finite-difference Hessian)
+            trial_func: Optional. Per-trial log-likelihood, shape (T,).
+                If given, uses the Mod 5 Gauss-Newton curvature instead
+                of Mod 2's finite-difference Hessian.
+            prior_precision: Optional d×d prior precision, added exactly
+                to the Gauss-Newton curvature (only used with trial_func).
 
         Returns:
-            Hessian matrix (d × d)
+            Hessian/curvature matrix (d × d)
         """
+        if trial_func is not None:
+            return self._gauss_newton_curvature(trial_func, x, prior_precision)
+
         n = len(x)
         H = np.zeros((n, n))
 
@@ -311,23 +332,129 @@ class BFGSOptimizer:
 
 
     # ══════════════════════════════════════════════════════════════════
+    # MODIFICATION 5 — Gauss-Newton curvature (VBA-style, opt-in)
+    # ──────────────────────────────────────────────────────────────────
+    #
+    # Add the following NEW method (does not exist in the original):
+    #
+    def _gauss_newton_curvature(self,
+                                trial_func: Callable[[np.ndarray], np.ndarray],
+                                x: np.ndarray,
+                                prior_precision: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Gauss-Newton curvature:  H = J^T J  (+ prior_precision).
+
+        J = d(per-trial log-lik)/d(theta), shape (T, d), obtained by a
+        SINGLE finite difference per parameter (T evaluations per column,
+        not (n+1)^2 like Mod 2) — same step rule as VBA_numericDiff.m:
+        relative step 1e-4*x, floored at 1e-4 in magnitude.
+        """
+        n = len(x)
+        f0 = np.asarray(trial_func(x))          # (T,) per-trial log-lik
+        J = np.zeros((f0.shape[0], n))
+
+        for i in range(n):
+            dx = 1e-4 * x[i]
+            if abs(dx) <= 1e-4:
+                dx = 1e-4
+            x_step = x.copy()
+            x_step[i] += dx
+            J[:, i] = (np.asarray(trial_func(x_step)) - f0) / dx
+
+        H = J.T @ J
+        if prior_precision is not None:
+            H = H + prior_precision
+        return H
+    #
+    # WHAT
+    #   Build the curvature as the outer product of the per-trial
+    #   log-likelihood Jacobian, JᵀJ, plus the (exact) prior precision.
+    #   Requires the caller to expose a `trial_func` returning the
+    #   per-trial log-likelihood vector — the model's normal inner loop
+    #   already computes this before summing it into a scalar, so most
+    #   models only need to stop summing early to supply it.
+    #
+    # WHY — this is not an approximation of Mod 2, it replaces it
+    #   The exact Hessian of the negative log-posterior is
+    #
+    #       ∇²J(θ) = Σₜ Jₜᵀ Qₜ Jₜ  −  Σₜ rₜᵀ Qₜ ∂²gₜ/∂θ²  +  Σ₀⁻¹
+    #                └──────┬──────┘   └───────────┬───────────┘
+    #                 kept (this Mod)      dropped (Gauss-Newton approx.)
+    #
+    #   Dropping the residual-weighted second-derivative term is the
+    #   classical Gauss-Newton approximation for nonlinear least squares
+    #   (Nocedal & Wright, 2006, ch.10) — exact as residuals → 0, and it
+    #   is precisely the term responsible for indefinite curvature. The
+    #   surviving term ΣJᵀQJ is a sum of quadratic forms with Q positive
+    #   definite → positive-SEMI-definite by construction; adding the
+    #   prior precision Σ₀⁻¹ (also PD) makes the sum strictly PD. No
+    #   eigenvalue clipping is needed — there is nothing to clip.
+    #
+    #   In a flat (weakly-identified) direction, JᵀQJ → 0, so H → Σ₀⁻¹ in
+    #   that direction: the posterior covariance falls back to the PRIOR
+    #   covariance, not to an arbitrary constant like Mod 2's 1e-4 floor.
+    #   This is the correct Bayesian answer and is exactly what resolves
+    #   the evidence-contamination issue of Mod 2 (flat directions no
+    #   longer get an evidence penalty that depends on a tuning constant).
+    #
+    # WHY — single differencing, not double
+    #   Mod 2 finite-differences an already finite-differenced gradient
+    #   ((n+1)^2 objective calls, noise ~1e-6, sitting next to its own
+    #   1e-4 clip floor). This Mod differences the per-trial vector ONCE
+    #   (n+1 model calls, each returning all T trials at once) — no
+    #   compounding of differencing noise.
+    #
+    # REFERENCE — VBA toolbox (verified against this exact recipe)
+    #   • core/VBA_Iphi.m:100 / core/VBA_Itheta.m:82 —
+    #     `iSigma = iQ + precision * (Jacobian outer-product sum)`,
+    #     the same H = JᵀJ + prior-precision construction, used for BOTH
+    #     the Gauss-Newton step and (via core/VBA_Hpost.m:56 →
+    #     core/VBA_FreeEnergy.m:132) the Laplace evidence — VBA never
+    #     maintains two separate Hessians.
+    #   • utils/VBA_numericDiff.m:46,72-79 — single forward-difference
+    #     Jacobian, step `epsilon=1e-4 * x`, floored at `1e-4` — the
+    #     exact step rule reproduced above.
+    #   • utils/VBA_checkGN.m — VBA's rare-case safety valve (only fires
+    #     if this curvature's smallest eigenvalue is non-positive, which
+    #     cannot happen here by construction) also returns a flag
+    #     counting how often it fired — worth mirroring later if this
+    #     path ever needs its own diagnostic (see DEV.md §2.1).
+    #
+    # FUTURE OPTION — exact autodiff (not implemented here)
+    #   Replace the finite-difference Jacobian above with an exact one
+    #   (e.g. JAX `jacfwd`/`jacrev` on a JAX port of `trial_func`) to
+    #   remove the remaining O(sqrt(eps)) finite-difference error. The
+    #   H = JᵀJ + prior_precision formula is unchanged — only how J is
+    #   obtained changes. See cbm/dev/rl_jax_verify.py, which already
+    #   verifies this for both RL models (log-lik matches NumPy to
+    #   2e-14, gradient to 5e-10, GN curvature PSD).
+    # ══════════════════════════════════════════════════════════════════
+
+
+    # ══════════════════════════════════════════════════════════════════
     # MODIFICATION 3 — VBA-style Gauss-Newton refinement
     # ──────────────────────────────────────────────────────────────────
     #
     # Add the following NEW method (does not exist in the original):
     #
-    def _newton_polish(self, func, x, n_steps=30):
+    def _newton_polish(self, func, x, n_steps=30, trial_func=None, prior_precision=None):
         """
         VBA-style Gauss-Newton refinement.
         Iterates until the free energy stops improving.
         Returns (x, f, converged).
+
+        trial_func/prior_precision: see compute_hessian (Mod 5). If
+        trial_func is None, falls back to the Mod 2 finite-difference
+        Hessian, as before.
         """
         f_current = func(x)
         converged = False
         tol_df = 1e-4          # relative free-energy tolerance
 
         for _ in range(n_steps):
-            H = self.compute_hessian(func, x)   # regularised (Mod 2)
+            H = self.compute_hessian(func, x,
+                                      trial_func=trial_func,
+                                      prior_precision=prior_precision)
             g = approx_fprime(x, func, 1e-5)
 
             try:
@@ -660,7 +787,12 @@ class BFGSOptimizer:
     # Replace the ENTIRE optimize method above with the version below.
     # It combines four sub-changes (4a–4d) explained after the code.
     #
-    def optimize(self, func, x_init=None):
+    def optimize(self, func, x_init=None, trial_func=None, prior_precision=None):
+        """
+        trial_func/prior_precision: optional, see compute_hessian (Mod 5).
+        When supplied, the Newton polish and the returned Hessian use the
+        VBA-style Gauss-Newton curvature instead of the Mod 2 fallback.
+        """
         self.all_results = []
         n_attempts = self.num_init
 
@@ -718,15 +850,21 @@ class BFGSOptimizer:
 
         # ── 4c. Newton polish (requires Mod 3) ───────────────────
         best_result.x, best_result.f, converged = (
-            self._newton_polish(func, best_result.x)
+            self._newton_polish(func, best_result.x,
+                                 trial_func=trial_func,
+                                 prior_precision=prior_precision)
         )
         best_result.grad = approx_fprime(
             best_result.x, func, 1e-8)
         best_result.abs_g = np.mean(np.abs(best_result.grad))
 
-        # Regularised Hessian — always pos-def (Mod 2)
+        # Curvature at the optimum — Gauss-Newton (Mod 5) if trial_func
+        # was supplied, else the regularised finite-difference Hessian
+        # (Mod 2). Both are positive-definite by construction.
         hess = self.compute_hessian(
-            func, best_result.x, epsilon=1e-5)
+            func, best_result.x, epsilon=1e-5,
+            trial_func=trial_func, prior_precision=prior_precision)
+        hess_method = "gauss_newton" if trial_func is not None else "finite_diff_clipped"
         is_hess_pos = True
 
         # ── 4d. VBA-style convergence flag ───────────────────────
@@ -748,7 +886,8 @@ class BFGSOptimizer:
             n_runs=len(self.all_results),
             is_hess_pos=is_hess_pos,
             abs_g=best_result.abs_g,
-            x_init=best_result.x_init
+            x_init=best_result.x_init,
+            hess_method=hess_method
         )
     #
     # ──────────────────────────────────────────────────────────────────

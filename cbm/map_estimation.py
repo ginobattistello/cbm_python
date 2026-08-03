@@ -4,9 +4,9 @@ MAP (Maximum A Posteriori) estimation using quadratic (Laplace) approximation.
 """
 
 import numpy as np
-from typing import Callable, Any, Tuple
+from typing import Callable, Any, Tuple, Optional
 
-from .optimization_legacy import BFGSOptimizer, Config
+from .optimization import BFGSOptimizer, Config
 
 
 def log_posterior(parameters: np.ndarray,
@@ -44,7 +44,9 @@ def optimize_map(data: Any,
                  config: Config,
                  prior_mean: np.ndarray,
                  prior_precision: np.ndarray,
-                 method: str = 'LAP') -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
+                 method: str = 'LAP',
+                 model_trials: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None
+                 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Quadratic approximation using Laplace approximation (MAP estimation).
 
@@ -55,6 +57,12 @@ def optimize_map(data: Any,
         prior_mean: Prior mean (d-dimensional array)
         prior_precision: Prior precision matrix (d×d array)
         method: Method name (only 'LAP' supported)
+        model_trials: Optional. Same signature as `model` but returns the
+            per-trial log-likelihood array (T,) instead of the summed
+            scalar (sum(model_trials(theta, data)) == model(theta, data)).
+            When given, the Hessian at the MAP is the VBA-style
+            Gauss-Newton curvature (optimization.py Mod 5) instead of
+            the finite-difference/eigenvalue-clip fallback (Mod 2).
 
     Returns:
         Tuple of (loglik, parameters, hessian, grad, flag) where:
@@ -69,15 +77,22 @@ def optimize_map(data: Any,
     if method != 'LAP':
         raise ValueError(f"Method '{method}' is not recognized! Only 'LAP' is supported.")
 
-    d = len(prior_mean)    
+    d = len(prior_mean)
     optimizer = BFGSOptimizer(d, config=config)
 
     # Define objective function (negative log posterior)
     def objective(theta_vec):
         return -log_posterior(theta_vec, model, data, prior_mean, prior_precision)
 
+    trial_func = None
+    if model_trials is not None:
+        def trial_func(theta_vec):
+            return model_trials(theta_vec, data)
+
     # Optimize, starting from prior mean
-    result = optimizer.optimize(objective, x_init=prior_mean.flatten())
+    result = optimizer.optimize(objective, x_init=prior_mean.flatten(),
+                                 trial_func=trial_func,
+                                 prior_precision=prior_precision)
 
     # Extract results
     if result.flag == 0:

@@ -46,8 +46,39 @@ def RL_model(parameters, data):
         reward = rewards[t]
         delta = reward - Q[action]
         Q[action] = Q[action] + alpha * delta
-    
+
     return log_lik
+
+
+def RL_model_trials(parameters, data):
+    """
+    Same model as RL_model, but returns the per-trial log-likelihood
+    array instead of the summed scalar (sum(...) == RL_model(...)).
+    Enables the VBA-style Gauss-Newton curvature (optimization.py Mod 5)
+    instead of the finite-difference/eigenvalue-clip fallback (Mod 2).
+    """
+    choices, rewards = data
+    alpha = 1 / (1 + np.exp(-parameters[0]))
+    beta = np.exp(parameters[1])
+
+    n_trials = len(choices)
+    n_options = 2
+    Q = np.zeros(n_options)
+
+    log_liks = np.zeros(n_trials)
+    for t in range(n_trials):
+        action = int(choices[t])
+        arg_exp = beta * Q
+        max_arg = np.max(arg_exp)
+        exp_values = np.exp(arg_exp - max_arg)
+        p = exp_values / np.sum(exp_values)
+        log_liks[t] = np.log(p[action] + 1e-10)
+
+        reward = rewards[t]
+        delta = reward - Q[action]
+        Q[action] = Q[action] + alpha * delta
+
+    return log_liks
 
 
 def RL2_model(parameters, data):
@@ -86,8 +117,41 @@ def RL2_model(parameters, data):
             Q[action] = Q[action] + alpha_pos * delta
         else:
             Q[action] = Q[action] + alpha_neg * delta
-    
+
     return log_lik
+
+
+def RL2_model_trials(parameters, data):
+    """
+    Same model as RL2_model, but returns the per-trial log-likelihood
+    array instead of the summed scalar (sum(...) == RL2_model(...)).
+    """
+    choices, rewards = data
+    alpha_pos = 1 / (1 + np.exp(-parameters[0]))
+    alpha_neg = 1 / (1 + np.exp(-parameters[1]))
+    beta = np.exp(parameters[2])
+
+    n_trials = len(choices)
+    n_options = 2
+    Q = np.zeros(n_options)
+
+    log_liks = np.zeros(n_trials)
+    for t in range(n_trials):
+        action = int(choices[t])
+        arg_exp = beta * Q
+        max_arg = np.max(arg_exp)
+        exp_values = np.exp(arg_exp - max_arg)
+        p = exp_values / np.sum(exp_values)
+        log_liks[t] = np.log(p[action] + 1e-10)
+
+        reward = rewards[t]
+        delta = reward - Q[action]
+        if delta >= 0:
+            Q[action] = Q[action] + alpha_pos * delta
+        else:
+            Q[action] = Q[action] + alpha_neg * delta
+
+    return log_liks
 
 
 # ============================================================================
@@ -157,14 +221,16 @@ print("+" * 70)
 prior_mean_rl = np.array([0, 0])  # [alpha, beta] in unconstrained space
 prior_variance_rl = 10
 config = {"num_init": 1} # Use single initialization for speed
-cbm_rl1 = individual_fit(all_data, RL_model, prior_mean_rl, prior_variance_rl, config=config)
+cbm_rl1 = individual_fit(all_data, RL_model, prior_mean_rl, prior_variance_rl, config=config,
+                          model_trials=RL_model_trials)
 with open(OUT_DIR / "cbm_rl1.pkl", "wb") as f:
     pickle.dump(cbm_rl1, f)
 
 prior_mean_rl2 = np.array([0, 0, 0])  # [alpha_pos, alpha_neg, beta] in unconstrained space
 prior_variance_rl2 = 10
 config = {"num_init": 1} # Use single initialization for speed
-cbm_rl2 = individual_fit(all_data, RL2_model, prior_mean_rl2, prior_variance_rl2, config=config)
+cbm_rl2 = individual_fit(all_data, RL2_model, prior_mean_rl2, prior_variance_rl2, config=config,
+                          model_trials=RL2_model_trials)
 with open(OUT_DIR / "cbm_rl2.pkl", "wb") as f:
     pickle.dump(cbm_rl2, f)
 

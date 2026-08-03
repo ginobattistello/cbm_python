@@ -15,7 +15,7 @@ import warnings
 import time
 
 from .map_estimation import optimize_map, log_posterior
-from .optimization_legacy import BFGSOptimizer, Config
+from .optimization import BFGSOptimizer, Config
 
 
 @dataclass
@@ -111,7 +111,9 @@ def individual_fit(data: List[Any],
                    prior_mean: np.ndarray,
                    prior_variance: np.ndarray | float,
                    fname: Optional[str] = None,
-                   config: Optional[Union[Config, dict]] = None) -> FitResult:
+                   config: Optional[Union[Config, dict]] = None,
+                   model_trials: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None
+                   ) -> FitResult:
     """
     Individual subject fitting using Laplace approximation.
 
@@ -122,6 +124,12 @@ def individual_fit(data: List[Any],
         prior: Prior object with mean and variance
         fname: Filename for saving output using pickle (None for no saving)
         config: Configuration object (optional)
+        model_trials: Optional. Same signature as `model` but returns the
+            per-trial log-likelihood array instead of the summed scalar
+            (sum(model_trials(theta, data)) == model(theta, data)). When
+            given, the Hessian/evidence at each subject's MAP uses the
+            VBA-style Gauss-Newton curvature (see optimization.py Mod 5)
+            instead of the finite-difference/eigenvalue-clip fallback.
 
     Returns:
         Tuple of (cbm, success) where:
@@ -199,7 +207,8 @@ def individual_fit(data: List[Any],
 
         # Call optimize_map for this subject
         loglik_n, parameters_n, hessian_n, grad_n, flag_n = optimize_map(
-            dat, model, config, prior.mean.flatten(), prior.precision, method='LAP'
+            dat, model, config, prior.mean.flatten(), prior.precision, method='LAP',
+            model_trials=model_trials
         )
 
         # Handle failed optimization
