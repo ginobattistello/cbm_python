@@ -3,7 +3,9 @@
 **Repo:** `ginobattistello/cbm_python` (fork of `payampiray/cbm_python`)
 **Working copy:** `~/Documents/` (local; may be ahead of GitHub)
 **Staging folder:** `cbm/dev/` (was `bmc_TO_ADD/`, renamed for clarity) — holds work in
-progress not yet wired into the package: `group_bms.py` (§5) and `rl_jax_verify.py` (§2.3).
+progress not yet wired into the package (`group_bms.py`, §5) plus regression/verification
+harnesses kept alongside the code they check (`rl_jax_verify.py` for §2.3's JAX option;
+`gn_numpy_verify.py` for §2.1/§2.3(C)'s NumPy Gauss-Newton curvature, done 2026-08-03).
 Local only for now; not yet pushed to GitHub.
 **Reference:** MBB-team/VBA-toolbox (MATLAB)
 **Guiding constraint:** simple, clear, transparent. Every change traceable and justified.
@@ -26,14 +28,23 @@ VBA does full Variational Bayesian inversion. We port *behaviors*, not the frame
 
 ## 1. State of play (read from the pushed fork)
 
-Four annotated modifications exist in `cbm/optimization.py`:
+**[2026-08-03 update]** `cbm/optimization.py` (the annotated file, below) was **not actually
+wired into the package** — `individual_fit.py` and `map_estimation.py` both imported
+`optimization_legacy.py`, which silently carried the same MOD 1-4 logic without the
+comments. Fixed: both now import from `optimization.py`. `optimization_legacy.py` is kept,
+frozen, as the pre-Gauss-Newton (MOD 1-4 only) baseline for A/B comparison — it was never
+actually the pristine pre-fork original (that only exists at commit `e72193f`), so treat it
+as "baseline as of 2026-08-03", not "upstream original".
+
+Five annotated modifications now exist in `cbm/optimization.py`:
 
 | # | What | Status |
 |---|------|--------|
 | 1 | Bounds validation in `Config.__post_init__` | **Commented out — inactive** |
-| 2 | Hessian eigenvalue regularization (floor 1e-4) | Active |
+| 2 | Hessian eigenvalue regularization (floor 1e-4) | Active — fallback when no `trial_func` given (see Mod 5) |
 | 3 | `_newton_polish` — Gauss-Newton refinement w/ backtracking | Active |
 | 4 | Rewritten `optimize` method | Active |
+| 5 | `_gauss_newton_curvature` — VBA-style `H = JᵀJ + prior_precision` | **Active, opt-in via `trial_func`** — resolves §2.1/§2.3, see below |
 
 The `MODIFICATION n — WHAT / WHY / REFERENCE` comment convention is good. **Keep it.**
 It is the single best transparency asset in the repo — the manual can be generated from it.
@@ -44,7 +55,7 @@ It is the single best transparency asset in the repo — the manual can be gener
 
 These are design decisions, not bugs to patch blindly.
 
-### 2.1 The regularized Hessian contaminates model evidence  ← highest priority
+### 2.1 The regularized Hessian contaminates model evidence  ← RESOLVED 2026-08-03
 
 `compute_hessian` clips all eigenvalues to `max(λ, 1e-4)`. This is correct and necessary
 for *taking Newton steps*. But the same Hessian feeds the Laplace log-evidence:
@@ -58,14 +69,40 @@ model B does not, A is penalized by an amount that is an **artifact of the regul
 not evidence. This propagates directly into BMS, HBI, and the group/condition BMC of
 workstream 3 — i.e. into your actual scientific conclusions.
 
-**Proposed resolution:** split the two uses.
-- `compute_hessian(..., regularize=True)` → optimization steps
-- `compute_hessian(..., regularize=False)` → inference / log-evidence
-- Record `n_eigenvalues_clipped` and `min_eigenvalue_raw` in the result object.
-  If clipping was needed at the MAP, that fit's evidence is **flagged as unreliable**,
-  not silently corrected.
+**Originally proposed resolution (superseded — do not implement):** split the two uses,
+`compute_hessian(..., regularize=True/False)`. Checking the actual VBA source
+(`C:\Users\Paul\Documents\VBA-toolbox`) before implementing this showed VBA doesn't have
+this problem in the first place — it never needs two Hessians. See below.
 
-*This decision is the hinge between workstream 1 and workstream 3 — resolve it first.*
+**Actual resolution — Gauss-Newton curvature (MODIFICATION 5, `cbm/optimization.py`):**
+`core/VBA_Iphi.m:100` / `core/VBA_Itheta.m:82` build the curvature as
+`H = Σₜ Jₜᵀ Qₜ Jₜ + Σ₀⁻¹` (Jacobian outer-product sum + prior precision) — the classical
+Gauss-Newton approximation for nonlinear least squares (drops the residual-weighted
+second-derivative term of the exact Hessian, which is exactly the term responsible for
+indefinite curvature). This sum is **positive-definite by construction** (sum of quadratic
+forms + prior precision), so there is nothing to clip, and VBA reuses this *same* curvature
+for both the Newton step *and* the evidence (`core/VBA_Hpost.m:56` → `core/VBA_FreeEnergy.m:132`
+use `posterior.SigmaPhi`/`SigmaTheta`, the un-modified GN output) — no split needed. In a flat
+direction, `JᵀQJ → 0` so `H → Σ₀⁻¹`: the posterior covariance falls back to the *prior*
+covariance, not to an arbitrary constant like the old 1e-4 floor — this is what actually fixes
+the evidence-contamination problem, not a reliability flag on top of the old clip.
+
+Implemented as `BFGSOptimizer._gauss_newton_curvature` (opt-in via `trial_func`, a per-trial
+log-likelihood callable — most models already compute this internally before summing it into
+a scalar). `J` is obtained by a single finite difference per parameter (step rule copied from
+`utils/VBA_numericDiff.m`: `1e-4·θ`, floored at `1e-4`) — not JAX yet, see §2.3. Falls back to
+the old eigenvalue-clipped Hessian (Mod 2) when `trial_func` isn't supplied, so existing models
+keep working unchanged.
+
+**Verified** (`cbm/dev/gn_numpy_verify.py`, RL2 model, 100 trials, 1 subject): MAP parameters
+match the old path to `1.8e-8` (`f` to `7e-15`) — as expected, GN and the old Hessian only
+disagree on curvature, not on where the optimum is. But the curvature itself differs
+meaningfully: eigenvalues `[0.29, 2.48, 26.0]` (old, clipped) vs `[0.75, 1.96, 26.0]` (GN),
+and log-evidence differs by **0.36 nat** on this one subject — confirming this was a real,
+not cosmetic, contamination of §5's BMS/HBI inputs. Backward compatibility (no `trial_func`)
+re-verified via `individual_fit` on multiple subjects — unchanged behavior.
+
+*This was the hinge between workstream 1 and workstream 3 — resolved before continuing either.*
 
 ### 2.2 `converged` currently carries no information
 
@@ -89,10 +126,11 @@ problem, fixed by computing derivatives exactly instead of by differencing.
 
 | # | What | Why | Status |
 |---|------|-----|--------|
-| A | Port each model log-likelihood to JAX | exact gradients at `O(1)` cost, zero differencing noise | **verified** (both RL models) |
-| B | Pass `jac=grad(loglik)` to the `L-BFGS-B` call in `_single_optimization` | removes the restart loop's dominant cost (repeated gradient differencing) | proposed |
-| C | At the MAP, replace `compute_hessian` with `jax.hessian` (for the evidence) **or** Gauss-Newton `Σₜ ∇ℓₜ∇ℓₜᵀ + prior precision` (for stepping) | exact evidence Hessian; GN is PSD by construction → the Mod 2 clip retires | **verified** PSD |
-| D | *Fallback only if a model can't be made differentiable:* central-difference the evidence Hessian, and reuse curvature across polish steps (quasi-Newton / LM damping) | `O(ε²)` accuracy at ~2× cost; avoids rebuilding `(n+1)²` Hessian up to 30× | proposed |
+| A | Port each model log-likelihood to JAX | exact gradients at `O(1)` cost, zero differencing noise | **verified** (both RL models, `cbm/dev/rl_jax_verify.py`) — not yet wired into the package |
+| B | Pass `jac=grad(loglik)` to the `L-BFGS-B` call in `_single_optimization` | removes the restart loop's dominant cost (repeated gradient differencing) | proposed — needs A wired in first |
+| C | At the MAP, replace `compute_hessian` with Gauss-Newton `Σₜ ∇ℓₜ∇ℓₜᵀ + prior precision` | PSD by construction → the Mod 2 clip retires; matches VBA exactly (`core/VBA_Iphi.m:100`) | **DONE 2026-08-03**, NumPy version (single finite-difference Jacobian, not JAX) — see §2.1. `jax.hessian` (the other C option originally listed) was dropped: it is *not* PSD (verified indefinite even at the MAP in `rl_jax_verify.py`), so it doesn't actually solve §2.1 the way GN does — GN was always the right half of "C". |
+| A→C via JAX | Swap the NumPy finite-difference Jacobian in Mod 5 for an exact one (`jax.jacfwd` on a JAX port of the per-trial log-lik) | removes the last `O(√ε)` finite-difference error from the now-PSD curvature | **future option**, deliberately deferred (2026-08-03 decision: ship NumPy first, ship correct, add exact derivatives later without changing the `H = JᵀJ + prior` formula). `cbm/dev/rl_jax_verify.py` already has the JAX side ready when this is picked back up — prefer `jacfwd` over the `jacrev` used there (d≪T for these models, forward-mode is O(d) passes vs reverse-mode's O(T)). |
+| D | *Fallback only if a model can't be made differentiable:* central-difference the evidence Hessian, and reuse curvature across polish steps (quasi-Newton / LM damping) | `O(ε²)` accuracy at ~2× cost; avoids rebuilding `(n+1)²` Hessian up to 30× | superseded by Mod 2 acting as the fallback (already existed, now correctly framed as "fallback for non-trial-decomposable models" rather than the default path) |
 
 **Porting recipe for (A) — three mechanical edits** (verified in `cbm/dev/rl_jax_verify.py`):
 trial loop → `jax.lax.scan` (Q as carry); `Q[a] = …` → `Q.at[a].set(…)`; and the only edit
@@ -115,15 +153,24 @@ strictly positive (`[1.26, 17.1]`) — GN approximates `−∇²log-lik`, hence 
 
 Port these, each as its own `MODIFICATION` block:
 
-- **Damping (Levenberg-Marquardt style).** VBA does not take raw Newton steps; it inflates
-  the precision when a step fails and relaxes it when steps succeed. This is more robust
-  than pure step-halving and adapts to local curvature.
-  → `H + λI`, with λ↑ on rejection, λ↓ on acceptance.
-- **Gauss-Newton curvature (verified — see §2.3 / `rl_jax_verify.py`).** Build the stepping
+- **Damping — CORRECTED 2026-08-03, do not implement `H + λI`.** Checked the actual VBA
+  source: `grep -rniE "lambda|damp" core/` returns nothing. VBA does **not** inflate/relax a
+  precision term. What it actually does on a rejected step (`core/VBA_GN.m:159-160`,
+  `utils/VBA_GaussNewton.m:85-86`): `deltaMu = 0.5 * deltaMu` — halve the *proposed move* from
+  the quadratic approximation and retry from the same point, i.e. backtracking on the Newton
+  direction, not a Levenberg-Marquardt precision inflation. `_newton_polish`'s existing
+  backtracking (halving `step` until `f` improves) is already closer to what VBA does than the
+  `H + λI` description below ever was — **nothing to change here**, the brief's original text
+  was wrong, not the code. (There *is* a real LM regularizer in VBA — `utils/VBA_checkGN.m` —
+  but it acts on the covariance only when its smallest eigenvalue is ≤ 0, a rare-case safety
+  valve with its own `flag`/count diagnostic, not a per-iteration damping loop. Irrelevant here
+  since Mod 5's GN curvature is PD by construction and never triggers it.)
+- **Gauss-Newton curvature — DONE 2026-08-03 (MODIFICATION 5, §2.1).** Build the stepping
   curvature as `Σₜ ∇ℓₜ∇ℓₜᵀ + prior precision` rather than a finite-difference Hessian. It is
-  positive-definite by construction (confirmed on both RL models), so damping only ever needs
-  to *accelerate*, never to rescue an indefinite Hessian — and the Mod 2 eigenvalue clip can
-  retire. This is the same curvature VBA damps, which is why it lives here and in §2.3.
+  positive-definite by construction, confirmed on RL2 (`cbm/dev/gn_numpy_verify.py`) and on
+  both RL models via JAX (`cbm/dev/rl_jax_verify.py`) — so the Mod 2 eigenvalue clip is now the
+  fallback, not the default path. This is the same curvature VBA uses for both stepping and
+  evidence (§2.1), which is why it was implemented together with §2.1 rather than separately.
 - **Monotonic objective guarantee.** Never accept a step that worsens the objective.
   Partly present (backtracking in `_newton_polish`); make it a global invariant.
 - **Sign/naming coherence.** The objective here is the *negative* log posterior and is
@@ -166,10 +213,14 @@ dispatches on input shape to three routines reproducing VBA:
 `_btw_groups` (list of 2D `L`) ≈ `VBA_groupBMC_btwGroups`.
 It builds on the existing `bms()` / `BMSResult` in `model_selection.py`.
 
-**Depends on §2.1.** Every input is a per-subject × per-model log-evidence `L`. That `L`
-comes from the Laplace approximation, whose Hessian is currently eigenvalue-clipped. So a
-flat-direction artifact in §2.1 is inherited by every frequency, exceedance and PXP number
-here. Fix §2.1 first, or this workstream computes clean statistics on contaminated evidence.
+**Depended on §2.1 — resolved 2026-08-03.** Every input is a per-subject × per-model
+log-evidence `L`. That `L` comes from the Laplace approximation, whose Hessian was
+eigenvalue-clipped, so a flat-direction artifact would have been inherited by every
+frequency, exceedance and PXP number here. §2.1 is now fixed (Gauss-Newton curvature,
+Mod 5) *but only for models that pass `model_trials` into `individual_fit`/`optimize_map`* —
+if group_bms.py is fed evidence from a fit that didn't opt in, it's still on the Mod 2
+fallback. Check which path produced `L` before trusting these statistics (`hess_method` field
+on the fit's `OptimizationResult`, or `cbm.math.hessian` provenance in `FitResult`).
 
 ### What already checks out (do not re-litigate)
 - **Between-conditions** sums tuple log-evidence across conditions (`Lt`), then tests the
@@ -243,12 +294,19 @@ Sections map onto the above, so it should be written *last* but *outlined first*
    save parameter estimates, log-evidence, timings. Every later change is judged against it.
    Keep `cbm/dev/rl_jax_verify.py` alongside it — it already pins the autodiff port to the
    NumPy models numerically, so it doubles as the regression check when wiring §2.3 (A)–(C) in.
-3. Work **one MODIFICATION block at a time**, in the order: §2.2 → §2.1 → §3 → §4 → §5.
+3. Work **one MODIFICATION block at a time**, in the order: ~~§2.2~~ → §2.1 → §3 → §4 → §5.
    The §2.3 autodiff/Gauss-Newton work slots into §2.1+§3 (it supplies the exact/PSD Hessian
    both depend on); do the JAX port of the model likelihood before those two blocks.
+   **[2026-08-03: order changed — did §2.1+§3's Gauss-Newton curvature (Mod 5) before §2.2,
+   since it was already fully scoped after the VBA cross-check and §2.2 doesn't depend on it.
+   §2.2 (explicit convergence status) is next.]**
 4. After each block: re-run the baseline, diff the numbers, record the delta in the block's
    comment. If a change moves the numbers, that must be explained, not just observed.
+   Done for Mod 5: see §2.1's verification note and `cbm/dev/gn_numpy_verify.py`.
 5. Only then write the manual, drawing text from the MODIFICATION blocks.
 
-**Non-negotiables:** no silent corrections; no undocumented change; keep
-`optimization_legacy.py` as the untouched reference for A/B comparison.
+**Non-negotiables:** no silent corrections; no undocumented change; keep a frozen baseline
+for A/B comparison — **as of 2026-08-03 this is `optimization_legacy.py`** (MOD 1-4 only, pre-
+Gauss-Newton), not the pristine upstream original (that's commit `e72193f` only). Do not edit
+`optimization_legacy.py` going forward; `cbm/optimization.py` is now the live file (imported by
+`individual_fit.py`/`map_estimation.py` — this wasn't true before 2026-08-03, see §1).
