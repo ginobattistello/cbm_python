@@ -2,6 +2,9 @@ from itertools import product as iterproduct
 from scipy.stats import dirichlet
 import warnings
 
+from cbm.model_selection import bms
+import numpy as np
+
 
 class GroupBMS:
     """
