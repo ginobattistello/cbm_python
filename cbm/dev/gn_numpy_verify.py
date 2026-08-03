@@ -5,8 +5,14 @@ vs the Mod 2 finite-difference/eigenvalue-clip fallback.
 Fits the same subject (RL2 model, example_RL.py's generator/prior) both
 ways and compares parameters, Hessian eigenvalues, and log-evidence.
 """
+import sys
 import time
+from pathlib import Path
+
 import numpy as np
+
+# Make the repo root importable so this runs without installing the package.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cbm.optimization import BFGSOptimizer, Config
 

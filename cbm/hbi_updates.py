@@ -258,7 +258,10 @@ def hbi_qhquad(
         for n in range(N):
             cfg.inits = qh.parameters[k][:, n]
             from .map_estimation import optimize_map, log_posterior
-            logf_kn, theta_kn, A_kn, _, flag_kn = optimize_map(
+            # optimize_map returns 6 values as of 2026-08-03 (DEV.md §4):
+            # the trailing OptimizationResult carries per-fit diagnostics;
+            # not yet surfaced in HBI's own result structures.
+            logf_kn, theta_kn, A_kn, _, flag_kn, _ = optimize_map(
                 data[n], models[k], cfg, prior.mean.flatten(), prior.precision, 'LAP'
             )
             if flag_kn == 0:

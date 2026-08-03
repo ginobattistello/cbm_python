@@ -1,7 +1,13 @@
+import sys
 import numpy as np
-from code.methods.utils.cbm_python.cbm.individual_fit import individual_fit
 import pickle
 from pathlib import Path
+
+# Make the repo root importable so this script runs without installing the
+# package (`python examples/exampla_individual_fit.py` from anywhere).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from cbm.individual_fit import individual_fit
 
 def linear_model(parameters, data):
     """

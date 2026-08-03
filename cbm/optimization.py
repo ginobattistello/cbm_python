@@ -18,6 +18,16 @@ OVERVIEW OF MODIFICATIONS
   5  compute_hessian       — VBA-style Gauss-Newton curvature,
                              opt-in via `trial_func` (replaces Mod 2
                              for models that expose per-trial log-lik)
+  6  ConvergenceStatus     — explicit convergence status enum replacing
+                             the always-True `converged` boolean of
+                             Mod 3/4; explicit status→flag mapping
+  7  monotonicity invariant — polish exit + optimize() boundary both
+                             verify descent; RuntimeError on violation
+  8  sign/naming coherence — objective is `neg_log_post` (minimized);
+                             `F = −neg_log_post` property at boundary
+  9  post-fit diagnostics  — raw min eigenvalue, clip count, cross-init
+                             agreement, hard-bound mask; surfaced via
+                             PostFitDiagnostics → FitMath.diagnostics
 ─────────────────────────────────────────────────────────────────
 Modifications 2-4 are interdependent and should be applied together:
   • Mod 2 guarantees a positive-definite Hessian for Mod 3's Newton step
@@ -27,6 +37,13 @@ Modifications 2-4 are interdependent and should be applied together:
 Modification 5 supersedes Modification 2 whenever the caller supplies
 `trial_func`; Mod 2 remains the fallback for models that cannot expose
 a per-trial decomposition (see Mod 5's docstring below).
+Modification 6 supersedes Mod 4d's flag branch (the boolean it
+branched on carried no information; see Mod 6's block below).
+Modifications 7-9 implement DEV.md §3's remaining items and §4's
+check layers (2026-08-03); Mod 1 was activated the same day (§4's
+bounds checks live there). The pre-flight layer itself lives in
+individual_fit._preflight_checks — checks that need `data` and the
+prior cannot live in this file.
 ─────────────────────────────────────────────────────────────────
 """
 
@@ -34,7 +51,104 @@ import numpy as np
 from scipy.optimize import minimize, approx_fprime
 from typing import Callable, Optional, List
 from dataclasses import dataclass
+from enum import Enum
 import warnings
+
+
+# ══════════════════════════════════════════════════════════════════
+# MODIFICATION 6 — Explicit convergence status (replaces the
+#                  always-True `converged` boolean of Mods 3/4)
+# ──────────────────────────────────────────────────────────────────
+#
+class ConvergenceStatus(str, Enum):
+    """
+    How `_newton_polish` (Mod 3) exited. Exactly one status per fit;
+    each member corresponds to one real exit path — no member is
+    unreachable by design (a `CONVERGED_GRAD` member was considered
+    and deliberately dropped: the polish never tests the gradient,
+    so it would be permanently dead — DEV.md §2.2, 2026-08-03).
+
+    Members
+    -------
+    CONVERGED_DF      The VBA criterion |ΔF|/(1+|F|) < tol_df was met.
+    NO_IMPROVEMENT    Backtracking exhausted: 20 step-halvings (down to
+                      ~1e-6) could not reduce f. Signature of already
+                      sitting at the minimum, not of failure.
+    MAX_STEPS         The 30-step Newton loop ended without meeting
+                      tol_df. Monotonic descent guarantees f never
+                      worsened, so the point is no worse than the
+                      L-BFGS-B optimum it started from.
+    SINGULAR_HESSIAN  np.linalg.solve raised LinAlgError: the Newton
+                      direction could not be computed. Near-unreachable
+                      (GN curvature is PD by construction; the Mod 2
+                      fallback clips eigenvalues to 1e-4) — safety valve.
+
+    Inherits from `str` so it serializes cleanly (JSON, pickle, repr)
+    and compares equal to its literal value, e.g.
+    `status == "converged_df"`.
+    """
+    CONVERGED_DF = "converged_df"
+    NO_IMPROVEMENT = "no_improvement"
+    MAX_STEPS = "max_steps"
+    SINGULAR_HESSIAN = "singular_hessian"
+
+
+# Explicit status → flag mapping. NEVER replace this with a truthiness
+# test: `if status:` is true for EVERY member (the old bug, in enum
+# form), and `if status is CONVERGED_DF:` silently demotes the two
+# accept-paths below. Every member MUST appear here — a KeyError on a
+# new member is the desired failure mode (forces a deliberate decision
+# rather than a silent default).
+FLAG_FROM_STATUS = {
+    ConvergenceStatus.CONVERGED_DF: 1.0,
+    ConvergenceStatus.NO_IMPROVEMENT: 1.0,
+    ConvergenceStatus.MAX_STEPS: 1.0,
+    ConvergenceStatus.SINGULAR_HESSIAN: 0.5,
+}
+#
+# WHAT
+#   Replace the boolean returned by `_newton_polish` — which was set
+#   to True on every one of its four exit paths, i.e. a constant —
+#   with a four-state enum naming the actual exit path, surfaced on
+#   `OptimizationResult.convergence_status`. Map status → flag through
+#   the explicit table above instead of Mod 4d's `if converged … elif
+#   converged … else` branch (whose else-arm was dead code).
+#
+# WHY — a check that cannot report failure is not a check
+#   Workstream 2 (DEV.md §2.2/§4) builds post-fit diagnostics on the
+#   convergence status. With a constant `converged=True`, downstream
+#   code (Mod 4d, individual_fit, HBI) could not distinguish "ΔF
+#   criterion met" from "hit the iteration cap" from "Hessian solve
+#   failed". The enum records the distinction; the flag mapping keeps
+#   the *operational* behaviour identical for every currently-reachable
+#   path (all → 1.0), so this Mod adds information without moving any
+#   baseline number (verified: cbm/dev/baseline_snapshot.py --compare).
+#
+# WHY — flag values (decided 2026-08-03, DEV.md §2.2)
+#   CONVERGED_DF    → 1.0  unambiguous success (the VBA criterion).
+#   NO_IMPROVEMENT  → 1.0  already at the minimum (see enum docstring).
+#   MAX_STEPS       → 1.0  VBA also accepts at max iter; Mod 4d's
+#                          argument — a stable F with a noisy gradient
+#                          is a valid fit — applies. The status field,
+#                          not the flag, carries the nuance.
+#   SINGULAR_HESSIAN→ 0.5 + warn. Not 0.0: flag == 0 triggers prior
+#                          substitution in map_estimation.py:98,
+#                          individual_fit.py:215-228 and (opt-out-free)
+#                          hbi_updates.py:264-267, discarding the MAP
+#                          that L-BFGS-B already found — exactly the
+#                          silent data loss Mod 4d was written to
+#                          prevent. 0.5 records the concern without
+#                          destroying data (§4: a check never silently
+#                          changes a result — it flags or stops).
+#
+# REFERENCE
+#   • DEV.md §2.2 (design + decision log, 2026-08-03).
+#   • VBA_NLStateSpaceModel.m: |ΔF|/(1+|F|) < tol is the sole
+#     convergence criterion; VBA accepts at max iterations.
+#   • Consumers of flag (all test `== 0` only; nothing reads 0.5):
+#     map_estimation.py:98, individual_fit.py:215-228,
+#     hbi_updates.py:264-267.
+# ══════════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -88,12 +202,20 @@ class Config:
             raise ValueError("num_init_up must be >= num_init_med")
 
         # ══════════════════════════════════════════════════════════════
-        # MODIFICATION 1 — Activate bounds validation in Config
+        # MODIFICATION 1 — Bounds validation in Config  [ACTIVATED
+        #                  2026-08-03 — was commented out; DEV.md §3
+        #                  required "activate or delete", decided
+        #                  activate: §4's pre-flight layer needs exactly
+        #                  these checks (shapes 2×d, range ⊂ hard), and
+        #                  Config is where d and both bounds first meet]
         # ──────────────────────────────────────────────────────────────
         #
-        # In the modified version the following commented-out block is
-        # UNCOMMENTED so that range_bounds and hard_bounds are expanded
-        # to proper 2×d arrays as soon as Config is created.
+        # WHAT
+        #   Expand scalar/None bounds to proper 2×d arrays as soon as
+        #   Config is created; reject wrong shapes; reject range_bounds
+        #   not contained in hard_bounds (random initializations are
+        #   drawn from range_bounds, and L-BFGS-B constrains iterates to
+        #   hard_bounds — an init outside hard_bounds is a contradiction).
         #
         # RATIONALE — defence in depth
         #   In the original, scalar→array expansion only happens inside
@@ -102,35 +224,56 @@ class Config:
         #   optimizer, bounds may still be scalar and cause downstream
         #   shape-mismatch errors.  Validating early in Config guarantees
         #   a consistent 2×d shape regardless of usage path.
+        #   BFGSOptimizer.__init__ keeps its own expansion as a second
+        #   line of defence: deepcopy/unpickle do NOT re-run
+        #   __post_init__, so a Config restored from an old pickle (as
+        #   HBI does via profile.config) may still carry scalars.
+        #
+        # FAILURE BEHAVIOUR (§4: pre-flight → stop)
+        #   Wrong shape or range ⊄ hard → raise ValueError.
+        #   d is None → skip (nothing to validate against; the
+        #   optimizer's own expansion covers that path).
         # ══════════════════════════════════════════════════════════════
-        # if self.range_bounds is None:
-        #     self.range_bounds = np.array([
-        #         -5 * np.ones(self.d),
-        #         5 * np.ones(self.d)
-        #     ])
-        # elif np.isscalar(self.range_bounds):
-        #     self.range_bounds = np.array([
-        #         -self.range_bounds * np.ones(self.d),
-        #         self.range_bounds * np.ones(self.d)
-        #     ])
-        # else:
-        #     if self.range_bounds.shape != (2, self.d):
-        #         raise ValueError(f"range_bounds must be 2×{self.d} array, got shape {self.range_bounds.shape}")
-        #     self.range_bounds = self.range_bounds
-        # if self.hard_bounds is None:
-        #     self.hard_bounds = np.array([
-        #         -100 * np.ones(self.d),
-        #         100 * np.ones(self.d)
-        #     ])
-        # elif np.isscalar(self.hard_bounds):
-        #     self.hard_bounds = np.array([
-        #         -self.hard_bounds * np.ones(self.d),
-        #         self.hard_bounds * np.ones(self.d)
-        #     ])
-        # else:
-        #     if self.hard_bounds.shape != (2, self.d):
-        #         raise ValueError(f"hard_bounds must be 2×{self.d} array, got shape {self.hard_bounds.shape}")
-        #     self.hard_bounds = self.hard_bounds
+        if self.d is not None:
+            if self.range_bounds is None:
+                self.range_bounds = np.array([
+                    -5.0 * np.ones(self.d),
+                    5.0 * np.ones(self.d)
+                ])
+            elif np.isscalar(self.range_bounds):
+                self.range_bounds = np.array([
+                    -self.range_bounds * np.ones(self.d),
+                    self.range_bounds * np.ones(self.d)
+                ])
+            else:
+                self.range_bounds = np.asarray(self.range_bounds, dtype=float)
+                if self.range_bounds.shape != (2, self.d):
+                    raise ValueError(
+                        f"range_bounds must be 2×{self.d} array, "
+                        f"got shape {self.range_bounds.shape}")
+            if self.hard_bounds is None:
+                self.hard_bounds = np.array([
+                    -100.0 * np.ones(self.d),
+                    100.0 * np.ones(self.d)
+                ])
+            elif np.isscalar(self.hard_bounds):
+                self.hard_bounds = np.array([
+                    -self.hard_bounds * np.ones(self.d),
+                    self.hard_bounds * np.ones(self.d)
+                ])
+            else:
+                self.hard_bounds = np.asarray(self.hard_bounds, dtype=float)
+                if self.hard_bounds.shape != (2, self.d):
+                    raise ValueError(
+                        f"hard_bounds must be 2×{self.d} array, "
+                        f"got shape {self.hard_bounds.shape}")
+            # range_bounds ⊂ hard_bounds (§4 pre-flight)
+            if (np.any(self.range_bounds[0] < self.hard_bounds[0])
+                    or np.any(self.range_bounds[1] > self.hard_bounds[1])):
+                raise ValueError(
+                    "range_bounds must lie within hard_bounds "
+                    f"(range {self.range_bounds.tolist()} vs "
+                    f"hard {self.hard_bounds.tolist()})")
 
 @dataclass
 class OptimizationResult:
@@ -139,7 +282,10 @@ class OptimizationResult:
 
     Attributes:
         x: Optimized parameters (d-dimensional array)
-        f: Optimal function value (scalar)
+        f: Optimal function value (scalar). SIGN CONVENTION (Mod 8):
+           this is the minimized NEGATIVE log joint, f = −log p(y,θ*|m)
+           = neg_log_post at the optimum. Use the `F` property for the
+           VBA-convention (maximized) value.
         hess: Hessian matrix at optimum (d × d array), computed via finite differences
               Can be None for intermediate results
         grad: Gradient at optimum (d-dimensional array)
@@ -153,6 +299,30 @@ class OptimizationResult:
         hess_method: Which curvature `hess` came from — "gauss_newton"
               (Mod 5, VBA-style, PD by construction) or
               "finite_diff_clipped" (Mod 2 fallback, eigenvalue-floored)
+        convergence_status: How the Newton polish exited (Mod 6) —
+              see ConvergenceStatus. None on intermediate results
+              (from _single_optimization, before the polish runs).
+              `flag` is derived from this via FLAG_FROM_STATUS.
+        hess_raw_min_eig: Smallest eigenvalue of the curvature BEFORE
+              any regularisation (Mod 9). On the Mod 2 path a value
+              below 1e-4 means the clip fired and log|H| — hence the
+              evidence — is partly artifact (§2.1); on the GN path
+              nothing is clipped and this is simply the smallest
+              eigenvalue of JᵀJ + prior precision.
+        hess_n_clipped: How many eigenvalues the Mod 2 floor raised
+              (0 on the GN path by construction). Non-zero = the
+              evidence for this fit inherited the §2.1 contamination.
+        n_inits_agreeing: How many of the n_runs initializations ended
+              within the ΔF tolerance of the best pre-polish optimum —
+              the practical multimodality diagnostic (Mod 9):
+              n_inits_agreeing == n_runs suggests a well-behaved
+              surface; a low fraction means multiple local optima.
+              Trivially 1 when num_init=1.
+        at_hard_bounds: Boolean mask (d,) — parameters sitting exactly
+              on a hard bound at the optimum (Mod 9). Any True means
+              the MAP is a boundary point: the Laplace approximation
+              (interior-optimum assumption) is invalid in that
+              direction and a warning is emitted.
     """
     x: np.ndarray
     f: float
@@ -166,6 +336,94 @@ class OptimizationResult:
     abs_g: float
     x_init: np.ndarray
     hess_method: str = "finite_diff_clipped"
+    convergence_status: Optional[ConvergenceStatus] = None
+    # Post-fit diagnostics (Mod 9) — informational only, never alter
+    # the fit. None on intermediate results.
+    hess_raw_min_eig: Optional[float] = None
+    hess_n_clipped: Optional[int] = None
+    n_inits_agreeing: Optional[int] = None
+    at_hard_bounds: Optional[np.ndarray] = None
+
+    # ══════════════════════════════════════════════════════════════
+    # MODIFICATION 8 — Sign/naming coherence (DEV.md §3)
+    # ──────────────────────────────────────────────────────────────
+    # WHAT
+    #   Fix the sign convention at the result boundary. The optimizer
+    #   MINIMIZES the negative log joint (neg_log_post); VBA MAXIMIZES
+    #   free energy F. `f` is the minimized value; the two properties
+    #   below give both conventions their unambiguous name so the
+    #   manual (workstream 4) never has to hedge about signs.
+    #
+    # WHY — the incoherence was real, not cosmetic
+    #   Before this Mod: map_estimation.log_posterior returned the
+    #   POSITIVE log joint while its own docstring claimed "negative
+    #   log posterior (for minimization)"; optimize_map's local
+    #   `objective` silently negated it; FitMath.loglik actually
+    #   stores the log JOINT (lik + prior), not the log-likelihood.
+    #   Docstrings corrected in map_estimation.py/individual_fit.py;
+    #   field names (`f`, `loglik`, `lme`) are kept — renaming them
+    #   would break existing pickles and user analysis code — and the
+    #   properties below provide the coherent vocabulary instead.
+    #
+    # PRECISION — what F is and is NOT
+    #   F = −f = log p(y,θ*|m), the log JOINT at the optimum.
+    #   It is NOT the Laplace log-evidence: that adds the curvature
+    #   correction, lme = F + (d/2)·log(2π) − ½·log|H|
+    #   (computed in individual_fit.py). Calling this quantity "F"
+    #   follows DEV.md §3's instruction; do not read it as VBA's full
+    #   variational free energy (which additionally bounds the
+    #   evidence from below).
+    # ══════════════════════════════════════════════════════════════
+    @property
+    def neg_log_post(self) -> float:
+        """The minimized objective: −log p(y,θ*|m). Alias for `f`."""
+        return self.f
+
+    @property
+    def F(self) -> float:
+        """VBA-convention (maximized) value: F = −neg_log_post
+        = log p(y,θ*|m), the log joint at the optimum. See Mod 8
+        note above — this is not yet the Laplace evidence."""
+        return -self.f
+
+    def diagnostics(self) -> "PostFitDiagnostics":
+        """Compact per-fit diagnostics record (Mod 9) for surfacing in
+        higher-level results (FitMath.diagnostics). Arrays copied to
+        plain lists so the record pickles small and prints readably."""
+        return PostFitDiagnostics(
+            convergence_status=(self.convergence_status.value
+                                if self.convergence_status is not None else None),
+            flag=self.flag,
+            hess_method=self.hess_method,
+            abs_grad=float(self.abs_g),
+            hess_raw_min_eig=self.hess_raw_min_eig,
+            hess_n_clipped=self.hess_n_clipped,
+            n_inits_agreeing=self.n_inits_agreeing,
+            n_runs=self.n_runs,
+            at_hard_bounds=(self.at_hard_bounds.tolist()
+                            if self.at_hard_bounds is not None else None),
+        )
+
+
+@dataclass
+class PostFitDiagnostics:
+    """
+    Per-subject post-fit diagnostics (DEV.md §4, layer 3; Mod 9).
+
+    Everything here is informational — none of it alters the fit.
+    Fields mirror OptimizationResult's diagnostic fields; see there
+    for semantics. `convergence_status` is the ConvergenceStatus
+    value string (Mod 6); `at_hard_bounds` a per-parameter bool list.
+    """
+    convergence_status: Optional[str]
+    flag: float
+    hess_method: str
+    abs_grad: float
+    hess_raw_min_eig: Optional[float]
+    hess_n_clipped: Optional[int]
+    n_inits_agreeing: Optional[int]
+    n_runs: int
+    at_hard_bounds: Optional[list]
 
 
 class BFGSOptimizer:
@@ -233,17 +491,19 @@ class BFGSOptimizer:
 
 
     def compute_hessian(self,
-                        func: Callable[[np.ndarray], float],
+                        neg_log_post: Callable[[np.ndarray], float],
                         x: np.ndarray,
                         epsilon: float = 1e-5,
                         trial_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-                        prior_precision: Optional[np.ndarray] = None) -> np.ndarray:
+                        prior_precision: Optional[np.ndarray] = None,
+                        return_diagnostics: bool = False):
         """
         Compute the curvature used for the Newton step and (at the MAP)
         for the Laplace evidence.
 
         Args:
-            func: Objective function (negative log posterior)
+            neg_log_post: Objective (negative log joint, MINIMIZED —
+                sign convention per Mod 8)
             x: Point at which to compute the curvature
             epsilon: Step size for the Mod 2 fallback (finite-difference Hessian)
             trial_func: Optional. Per-trial log-likelihood, shape (T,).
@@ -251,24 +511,36 @@ class BFGSOptimizer:
                 of Mod 2's finite-difference Hessian.
             prior_precision: Optional d×d prior precision, added exactly
                 to the Gauss-Newton curvature (only used with trial_func).
+            return_diagnostics: If True, return (H, diag) where diag is
+                {"raw_min_eig": smallest eigenvalue BEFORE any clipping,
+                 "n_clipped": how many eigenvalues the Mod 2 floor
+                 raised (always 0 on the Gauss-Newton path — nothing is
+                 clipped there)}. Post-fit diagnostics layer (Mod 9);
+                 purely informational, never alters H.
 
         Returns:
-            Hessian/curvature matrix (d × d)
+            Hessian/curvature matrix (d × d), or (H, diag) if
+            return_diagnostics.
         """
         if trial_func is not None:
-            return self._gauss_newton_curvature(trial_func, x, prior_precision)
+            H = self._gauss_newton_curvature(trial_func, x, prior_precision)
+            if return_diagnostics:
+                diag = {"raw_min_eig": float(np.linalg.eigvalsh(H).min()),
+                        "n_clipped": 0}
+                return H, diag
+            return H
 
         n = len(x)
         H = np.zeros((n, n))
 
         # Compute gradient at x
-        grad_x = approx_fprime(x, func, epsilon)
+        grad_x = approx_fprime(x, neg_log_post, epsilon)
 
         # Compute gradient at x + epsilon*e_i for each dimension
         for i in range(n):
             x_step = x.copy()
             x_step[i] += epsilon
-            grad_step = approx_fprime(x_step, func, epsilon)
+            grad_step = approx_fprime(x_step, neg_log_post, epsilon)
             H[i, :] = (grad_step - grad_x) / epsilon
 
         # Symmetrize
@@ -282,8 +554,14 @@ class BFGSOptimizer:
         #
         H = (H + H.T) / 2
         eigvals, eigvecs = np.linalg.eigh(H)
+        # Mod 9: record what the clip is about to do, BEFORE doing it —
+        # the raw spectrum is the §2.1 contamination diagnostic.
+        raw_min_eig = float(eigvals.min())
+        n_clipped = int(np.sum(eigvals < 1e-4))
         eigvals = np.maximum(eigvals, 1e-4)
         H = (eigvecs * eigvals) @ eigvecs.T
+        if return_diagnostics:
+            return H, {"raw_min_eig": raw_min_eig, "n_clipped": n_clipped}
         return H
         #
         # WHAT
@@ -437,30 +715,33 @@ class BFGSOptimizer:
     #
     # Add the following NEW method (does not exist in the original):
     #
-    def _newton_polish(self, func, x, n_steps=30, trial_func=None, prior_precision=None):
+    def _newton_polish(self, neg_log_post, x, n_steps=30, trial_func=None, prior_precision=None):
         """
         VBA-style Gauss-Newton refinement.
         Iterates until the free energy stops improving.
-        Returns (x, f, converged).
+        Returns (x, f, status) with status a ConvergenceStatus (Mod 6)
+        naming the exit path taken.
 
+        neg_log_post: the MINIMIZED objective (sign convention, Mod 8).
         trial_func/prior_precision: see compute_hessian (Mod 5). If
         trial_func is None, falls back to the Mod 2 finite-difference
         Hessian, as before.
         """
-        f_current = func(x)
-        converged = False
+        f_current = neg_log_post(x)
+        f_entry = f_current    # for the Mod 7 monotonicity invariant
+        status = None          # set by exactly one exit path (Mod 6)
         tol_df = 1e-4          # relative free-energy tolerance
 
         for _ in range(n_steps):
-            H = self.compute_hessian(func, x,
+            H = self.compute_hessian(neg_log_post, x,
                                       trial_func=trial_func,
                                       prior_precision=prior_precision)
-            g = approx_fprime(x, func, 1e-5)
+            g = approx_fprime(x, neg_log_post, 1e-5)
 
             try:
                 dx = np.linalg.solve(H, g)       # Newton direction
             except np.linalg.LinAlgError:
-                converged = True
+                status = ConvergenceStatus.SINGULAR_HESSIAN
                 break
 
             # Backtracking line search (halving up to 2^-20 ≈ 1e-6)
@@ -471,7 +752,7 @@ class BFGSOptimizer:
                 x_new = np.clip(x_new,
                                 self.hard_bounds[0],
                                 self.hard_bounds[1])
-                f_new = func(x_new)
+                f_new = neg_log_post(x_new)
                 if np.isfinite(f_new) and f_new < f_current:
                     improved = True
                     break
@@ -479,7 +760,7 @@ class BFGSOptimizer:
 
             if not improved:
                 # Cannot reduce f → already at minimum
-                converged = True
+                status = ConvergenceStatus.NO_IMPROVEMENT
                 break
 
             delta_f = abs(f_current - f_new)
@@ -487,14 +768,47 @@ class BFGSOptimizer:
 
             # VBA convergence criterion
             if delta_f / (1.0 + abs(f_current)) < tol_df:
-                converged = True
+                status = ConvergenceStatus.CONVERGED_DF
                 break
 
         # Exhausted steps → accept (VBA also accepts at max iter)
-        if not converged:
-            converged = True
+        if status is None:
+            status = ConvergenceStatus.MAX_STEPS
 
-        return x, f_current, converged
+        # ══════════════════════════════════════════════════════════════
+        # MODIFICATION 7 — Monotonic objective as a checked invariant
+        # ──────────────────────────────────────────────────────────────
+        # WHAT
+        #   Verify, at every exit of the polish, that the returned
+        #   objective is no worse than the objective at entry. A second
+        #   check at the optimize() boundary (see 4c') verifies the
+        #   polish never worsened the L-BFGS-B optimum.
+        #
+        # WHY
+        #   Backtracking (Mod 3) only accepts steps with f_new <
+        #   f_current, so monotonic descent is structural — but a
+        #   structural property that is never *checked* can be silently
+        #   broken by a future edit (e.g. someone "simplifying" the
+        #   acceptance test) or by a non-deterministic objective, and
+        #   would then corrupt every downstream evidence value. DEV.md
+        #   §3/§4: promote the local guard to a checked global
+        #   invariant; a violation means the results cannot be trusted,
+        #   so the defined failure behaviour is STOP (raise), not warn.
+        #
+        # REFERENCE
+        #   VBA's move-halving (core/VBA_GN.m:159-160) provides the same
+        #   structural guarantee; DEV.md §3 (damping investigation,
+        #   2026-08-03) established that backtracking is the correct
+        #   VBA-equivalent mechanism, this makes it verified.
+        # ══════════════════════════════════════════════════════════════
+        if f_current > f_entry:
+            raise RuntimeError(
+                "MONOTONICITY INVARIANT VIOLATED in _newton_polish: "
+                f"objective rose from {f_entry!r} to {f_current!r}. "
+                "This indicates a bug or a non-deterministic objective; "
+                "results cannot be trusted (DEV.md §3/§4).")
+
+        return x, f_current, status
     #
     # WHAT
     #   After L-BFGS-B finds an approximate minimum, refine it with
@@ -555,13 +869,13 @@ class BFGSOptimizer:
 
 
     def _single_optimization(self,
-                             func: Callable[[np.ndarray], float],
+                             neg_log_post: Callable[[np.ndarray], float],
                              x_init: np.ndarray) -> OptimizationResult:
         """
         Run a single optimization from given initial point.
 
         Args:
-            func: Objective function
+            neg_log_post: Objective (minimized; sign convention per Mod 8)
             x_init: Initial point
 
         Returns:
@@ -572,7 +886,7 @@ class BFGSOptimizer:
         run_history_f = []
 
         def func_wrapper(x):
-            f = func(x)
+            f = neg_log_post(x)
             run_history_x.append(x.copy())
             run_history_f.append(f)
             return f
@@ -601,7 +915,7 @@ class BFGSOptimizer:
 
         # Compute gradient at optimum using finite differences
         epsilon = 1e-8
-        grad = approx_fprime(x_opt, func, epsilon)
+        grad = approx_fprime(x_opt, neg_log_post, epsilon)
 
         # Check if inverse Hessian from L-BFGS is positive definite
         # This is cheap and good enough for selecting best run
@@ -787,8 +1101,12 @@ class BFGSOptimizer:
     # Replace the ENTIRE optimize method above with the version below.
     # It combines four sub-changes (4a–4d) explained after the code.
     #
-    def optimize(self, func, x_init=None, trial_func=None, prior_precision=None):
+    def optimize(self, neg_log_post, x_init=None, trial_func=None, prior_precision=None):
         """
+        neg_log_post: the objective to MINIMIZE — the negative log
+        joint −log p(y,θ|m) (sign convention per Mod 8; VBA's F is the
+        negative of this, see OptimizationResult.F).
+
         trial_func/prior_precision: optional, see compute_hessian (Mod 5).
         When supplied, the Newton polish and the returned Hessian use the
         VBA-style Gauss-Newton curvature instead of the Mod 2 fallback.
@@ -797,12 +1115,12 @@ class BFGSOptimizer:
         n_attempts = self.num_init
 
         # ── 4a. Defensive function wrapping ──────────────────────
-        _raw_func = func
-        def func(x):
+        _raw_neg_log_post = neg_log_post
+        def neg_log_post(x):
             with np.errstate(over='ignore', invalid='ignore',
                             divide='ignore'):
                 try:
-                    f = float(_raw_func(x))
+                    f = float(_raw_neg_log_post(x))
                     if np.isfinite(f):
                         return f
                 except Exception:
@@ -837,7 +1155,7 @@ class BFGSOptimizer:
         best_history_x, best_history_f = [], []
 
         for x0 in init_points:
-            result = self._single_optimization(func, x0)
+            result = self._single_optimization(neg_log_post, x0)
             self.all_results.append(result)
             if result.f < best_f:
                 best_f = result.f
@@ -849,34 +1167,89 @@ class BFGSOptimizer:
         self.history_f = best_history_f
 
         # ── 4c. Newton polish (requires Mod 3) ───────────────────
-        best_result.x, best_result.f, converged = (
-            self._newton_polish(func, best_result.x,
+        f_before_polish = best_result.f
+        best_result.x, best_result.f, status = (
+            self._newton_polish(neg_log_post, best_result.x,
                                  trial_func=trial_func,
                                  prior_precision=prior_precision)
         )
+        # ── 4c'. Monotonicity at the optimize() boundary (Mod 7) ─
+        # The polish must never return a worse point than L-BFGS-B
+        # found. Structural (backtracking) — but checked, per §4.
+        if best_result.f > f_before_polish:
+            raise RuntimeError(
+                "MONOTONICITY INVARIANT VIOLATED in optimize: Newton "
+                f"polish worsened the objective ({f_before_polish!r} "
+                f"→ {best_result.f!r}); results cannot be trusted "
+                "(DEV.md §3/§4, MODIFICATION 7).")
         best_result.grad = approx_fprime(
-            best_result.x, func, 1e-8)
+            best_result.x, neg_log_post, 1e-8)
         best_result.abs_g = np.mean(np.abs(best_result.grad))
 
         # Curvature at the optimum — Gauss-Newton (Mod 5) if trial_func
         # was supplied, else the regularised finite-difference Hessian
         # (Mod 2). Both are positive-definite by construction.
-        hess = self.compute_hessian(
-            func, best_result.x, epsilon=1e-5,
-            trial_func=trial_func, prior_precision=prior_precision)
+        hess, hess_diag = self.compute_hessian(
+            neg_log_post, best_result.x, epsilon=1e-5,
+            trial_func=trial_func, prior_precision=prior_precision,
+            return_diagnostics=True)
         hess_method = "gauss_newton" if trial_func is not None else "finite_diff_clipped"
         is_hess_pos = True
 
-        # ── 4d. VBA-style convergence flag ───────────────────────
-        if converged and best_result.abs_g < self.tol_grad:
-            flag = 1.0       # perfect convergence
-        elif converged:
-            flag = 1.0       # ΔF converged → accept
-        else:
-            flag = 0.5       # should not occur
+        # ══════════════════════════════════════════════════════════
+        # MODIFICATION 9 — Post-fit diagnostics (DEV.md §4, layer 3)
+        # ──────────────────────────────────────────────────────────
+        # WHAT
+        #   Surface, on the result object, the four §4 post-fit
+        #   diagnostics: gradient norm (abs_g, pre-existing), raw
+        #   minimum eigenvalue + clip count (hess_diag above),
+        #   cross-initialization agreement, and the Mod 6 convergence
+        #   status. Plus a boundary check: parameters railed at
+        #   hard_bounds invalidate the Laplace approximation in that
+        #   direction (interior-optimum assumption).
+        #
+        # WHY
+        #   §4 principle: a check never silently changes a result —
+        #   every value below is informational; the only side effect
+        #   is a warning when the MAP sits on a hard bound.
+        #   n_inits_agreeing is the practical multimodality test the
+        #   manual's interpretation section is built on: agreement is
+        #   measured on PRE-polish optima with the same ΔF-style
+        #   relative tolerance the polish uses (tol_df = 1e-4).
+        #
+        # REFERENCE
+        #   DEV.md §4 (post-fit layer); §2.1 (why the raw spectrum
+        #   matters for evidence); utils/VBA_checkGN.m (VBA's own
+        #   fired-regularizer counter, mirrored here by n_clipped).
+        # ══════════════════════════════════════════════════════════
+        # Cross-initialization agreement (pre-polish optima)
+        tol_df = 1e-4
+        n_inits_agreeing = int(sum(
+            1 for res in self.all_results
+            if abs(res.f - f_before_polish) / (1.0 + abs(f_before_polish)) < tol_df))
+
+        # Boundary check — exact equality is correct here: the polish
+        # clips to hard_bounds, and L-BFGS-B respects them as box
+        # constraints, so a railed parameter sits exactly on the bound.
+        at_hard_bounds = ((best_result.x <= self.hard_bounds[0])
+                          | (best_result.x >= self.hard_bounds[1]))
+        if np.any(at_hard_bounds):
             warnings.warn(
-                "Newton polish did not converge after "
-                f"{len(self.all_results)} initialisations.")
+                "MAP estimate sits on hard_bounds for parameter(s) "
+                f"{np.where(at_hard_bounds)[0].tolist()}; the Laplace "
+                "approximation assumes an interior optimum, so the "
+                "evidence for this fit is unreliable (Mod 9, DEV.md §4).")
+
+        # ── 4d. Convergence flag from explicit status (Mod 6) ────
+        # Explicit table lookup — see FLAG_FROM_STATUS for why this
+        # must never be a truthiness or identity test on the status.
+        flag = FLAG_FROM_STATUS[status]
+        if status is ConvergenceStatus.SINGULAR_HESSIAN:
+            warnings.warn(
+                "Newton polish aborted: singular Hessian in "
+                "np.linalg.solve (convergence_status="
+                f"{status.value}); accepting the L-BFGS-B optimum "
+                "with flag=0.5.")
 
         return OptimizationResult(
             x=best_result.x, f=best_result.f, hess=hess,
@@ -887,7 +1260,12 @@ class BFGSOptimizer:
             is_hess_pos=is_hess_pos,
             abs_g=best_result.abs_g,
             x_init=best_result.x_init,
-            hess_method=hess_method
+            hess_method=hess_method,
+            convergence_status=status,
+            hess_raw_min_eig=hess_diag["raw_min_eig"],
+            hess_n_clipped=hess_diag["n_clipped"],
+            n_inits_agreeing=n_inits_agreeing,
+            at_hard_bounds=at_hard_bounds
         )
     #
     # ──────────────────────────────────────────────────────────────────
@@ -945,19 +1323,26 @@ class BFGSOptimizer:
     #
     # ──────────────────────────────────────────────────────────────────
     # SUB-CHANGE 4d — VBA-style convergence flag
+    #          [flag *branch* superseded by MODIFICATION 6 — the
+    #          boolean it tested was constant, so the else-arm was
+    #          dead code. The flag is now FLAG_FROM_STATUS[status];
+    #          see Mod 6's block at the top of this file. The WHY
+    #          below still holds: it is the rationale for mapping
+    #          MAX_STEPS / NO_IMPROVEMENT to flag=1.0.]
     #
-    #   WHAT:  Always set flag = 1.0 when Newton polish converges (ΔF
-    #          criterion met), REGARDLESS of the gradient norm.
+    #   WHAT:  Accept the fit (flag = 1.0) when the Newton polish
+    #          exits through any descent path, REGARDLESS of the
+    #          gradient norm.
     #
     #   Original flag logic:
     #     flag=1.0 : scipy success  AND  Hessian PD  AND  |∇| < 0.001
     #     flag=0.5 : Hessian PD  AND  |∇| < 0.1
     #     flag=0.0 : otherwise  →  may trigger prior_for_failed
     #
-    #   Modified flag logic:
-    #     flag=1.0 : Newton polish converged (ΔF)
-    #     flag=0.5 : should never occur (_newton_polish always returns
-    #                converged=True, even at max iterations)
+    #   Flag logic as of Mod 6 (explicit, see FLAG_FROM_STATUS):
+    #     flag=1.0 : CONVERGED_DF / NO_IMPROVEMENT / MAX_STEPS
+    #     flag=0.5 : SINGULAR_HESSIAN (+ warning; near-unreachable,
+    #                curvature is PD by construction on both paths)
     #
     #   WHY — theory:
     #   The gradient norm is not the right convergence diagnostic for
@@ -1031,10 +1416,15 @@ if __name__ == "__main__":
 
 
     # Create optimizer for 4-dimensional problem
+    # [MOD 1 cleanup 2026-08-03: this demo predated the Config-based
+    #  constructor and no longer matched BFGSOptimizer's signature]
     optimizer = BFGSOptimizer(
         d=4,
-        range_bounds=np.array([[-2, -2, -2, -2], [2, 2, 2, 2]]),
-        num_init=10
+        config=Config(
+            d=4,
+            range_bounds=np.array([[-2, -2, -2, -2], [2, 2, 2, 2]]),
+            num_init=10
+        )
     )
 
     print("=" * 70)

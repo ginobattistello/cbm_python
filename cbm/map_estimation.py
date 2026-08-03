@@ -6,7 +6,7 @@ MAP (Maximum A Posteriori) estimation using quadratic (Laplace) approximation.
 import numpy as np
 from typing import Callable, Any, Tuple, Optional
 
-from .optimization import BFGSOptimizer, Config
+from .optimization import BFGSOptimizer, Config, OptimizationResult
 
 
 def log_posterior(parameters: np.ndarray,
@@ -15,7 +15,14 @@ def log_posterior(parameters: np.ndarray,
                            prior_mean: np.ndarray,
                            prior_precision: np.ndarray) -> float:
     """
-    Compute negative log posterior (for minimization).
+    Compute the (POSITIVE) unnormalized log posterior — the log joint
+    log p(y,θ|m) = log_likelihood + log_prior.
+
+    [Sign convention fixed 2026-08-03, optimization.py Mod 8: this
+    docstring previously claimed "negative log posterior (for
+    minimization)" while the code returned the positive value. The
+    CODE was right — the negation for minimization happens in
+    optimize_map's `neg_log_post` — only the docs were wrong.]
 
     Args:
         parameters: Parameters
@@ -25,7 +32,7 @@ def log_posterior(parameters: np.ndarray,
         prior_precision: Prior precision matrix (d×d)
 
     Returns:
-        Negative log posterior = -(log_likelihood + log_prior)
+        log_likelihood + log_prior  (log joint; maximized at the MAP)
     """
     # Compute log-likelihood
     log_lik = model(parameters, data)
@@ -46,7 +53,7 @@ def optimize_map(data: Any,
                  prior_precision: np.ndarray,
                  method: str = 'LAP',
                  model_trials: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None
-                 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
+                 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, float, "OptimizationResult"]:
     """
     Quadratic approximation using Laplace approximation (MAP estimation).
 
@@ -65,14 +72,20 @@ def optimize_map(data: Any,
             the finite-difference/eigenvalue-clip fallback (Mod 2).
 
     Returns:
-        Tuple of (loglik, parameters, hessian, grad, flag) where:
-            - loglik: Log-likelihood at MAP estimate
+        Tuple of (loglik, parameters, hessian, grad, flag, result) where:
+            - loglik: the log JOINT log p(y,θ*|m) = loglik + logprior at
+              the MAP — NOT the bare log-likelihood, despite the name
+              (kept for backward compatibility; Mod 8 sign/naming note).
+              Equals OptimizationResult.F = −neg_log_post.
             - parameters: MAP estimate (d-dimensional array)
             - hessian: Hessian of negative log posterior at MAP (d×d, this is the precision)
             - grad: Gradient at MAP (d-dimensional array)
             - flag: Convergence flag (1.0=success, 0.5=partial, 0.0=failed)
+            - result: the full OptimizationResult, carrying the Mod 6
+              convergence_status and Mod 9 post-fit diagnostics
+              (added 2026-08-03 for DEV.md §4's post-fit layer)
 
-        NOTE: If optimization fails (flag=0), all values except flag are np.nan
+        NOTE: If optimization fails (flag=0), all values except flag/result are np.nan
     """
     if method != 'LAP':
         raise ValueError(f"Method '{method}' is not recognized! Only 'LAP' is supported.")
@@ -80,8 +93,10 @@ def optimize_map(data: Any,
     d = len(prior_mean)
     optimizer = BFGSOptimizer(d, config=config)
 
-    # Define objective function (negative log posterior)
-    def objective(theta_vec):
+    # The minimized objective: negative log joint (sign convention per
+    # optimization.py Mod 8 — log_posterior returns the POSITIVE log
+    # joint; the single negation lives here and nowhere else).
+    def neg_log_post(theta_vec):
         return -log_posterior(theta_vec, model, data, prior_mean, prior_precision)
 
     trial_func = None
@@ -90,7 +105,7 @@ def optimize_map(data: Any,
             return model_trials(theta_vec, data)
 
     # Optimize, starting from prior mean
-    result = optimizer.optimize(objective, x_init=prior_mean.flatten(),
+    result = optimizer.optimize(neg_log_post, x_init=prior_mean.flatten(),
                                  trial_func=trial_func,
                                  prior_precision=prior_precision)
 
@@ -111,4 +126,4 @@ def optimize_map(data: Any,
 
     flag = result.flag
 
-    return loglik, parameters, hessian, grad, flag
+    return loglik, parameters, hessian, grad, flag, result

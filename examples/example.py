@@ -1,10 +1,15 @@
+import sys
 import numpy as np
 import pickle
 from pathlib import Path
 
-from code.methods.utils.cbm_python.cbm.hbi import hbi_main, hbi_null
-from code.methods.utils.cbm_python.cbm.individual_fit import individual_fit
-from code.methods.utils.cbm_python.cbm.model_selection import bms
+# Make the repo root importable so this script runs without installing the
+# package (`python examples/example.py` from anywhere).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from cbm.hbi import hbi_main, hbi_null
+from cbm.individual_fit import individual_fit
+from cbm.model_selection import bms
 
 # Paths
 BASE_DIR = Path(__file__).parent

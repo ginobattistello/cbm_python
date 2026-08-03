@@ -1,8 +1,14 @@
+import sys
 import numpy as np
-from code.methods.utils.cbm_python.cbm.individual_fit import individual_fit
-from code.methods.utils.cbm_python.cbm.model_selection import bms
 import pickle
 from pathlib import Path
+
+# Make the repo root importable so this script runs without installing the
+# package (`python examples/example_model_selection.py` from anywhere).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from cbm.individual_fit import individual_fit
+from cbm.model_selection import bms
 
 # Save outputs to examples/output
 BASE_DIR = Path(__file__).parent
