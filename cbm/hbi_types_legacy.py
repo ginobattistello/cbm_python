@@ -1,5 +1,31 @@
+"""
+FROZEN pre-fork snapshot — hbi_types.py as of commit 93a0be8 (2026-08-13),
+before MODIFICATIONS 11 and 12.
+
+Role
+----
+This is the HBI analogue of `optimization_legacy.py`: an unmodified reference
+copy kept for A/B comparison. **Nothing in the package imports it.** The live,
+modified code is at `cbm/hbi_types.py` and that is what you want unless you are
+deliberately measuring what Mods 11-12 changed.
+
+Difference from the live version
+--------------------------------
+MOD 11  no `model_trials` parameter, so `hbi_qhquad` calls `optimize_map` with
+        six positional arguments and every internal refit uses the Mod 2
+        finite-difference Hessian, whatever curvature the supplied cbm_maps
+        were fitted with.
+MOD 12  the `OptimizationResult` returned sixth by `optimize_map` is discarded;
+        `IndividualPosterior` has no `diagnostics` field.
+
+Its imports are rewired to the other `*_legacy` modules, so this snapshot is
+self-consistent. Without that it would import the MODIFIED `hbi_qhquad` and
+silently not be legacy behaviour at all.
+
+Used by `benchmark/run_hbi_arms.py` as the `cbm_orig` arm. See DEV.md §14-§15.
+"""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import numpy as np
 
 @dataclass
@@ -8,11 +34,6 @@ class IndividualPosterior:
     parameters: List[np.ndarray]
     hessian_inv_diag: List[np.ndarray]
     log_det_hessian: np.ndarray
-    # MODIFICATION 12 — (K, N) object array of PostFitDiagnostics from
-    # each refit, or None where the optimizer reported none. Optional
-    # with a None default so pickles written before Mod 12 still load
-    # (HBI results are routinely saved to disk and re-read by hbi_null).
-    diagnostics: Optional[np.ndarray] = None
 
 @dataclass
 class ProgressChange:

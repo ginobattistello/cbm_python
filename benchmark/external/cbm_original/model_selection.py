@@ -222,15 +222,7 @@ def fe_null(L: np.ndarray, options: dict) -> Tuple[float, Optional[float]]:
 
     if options['families']:
         C = options['C']
-        # Family-null prior over models: f0[k] = 1/(nf · |family(k)|),
-        # i.e. equal mass per FAMILY, split equally within each family.
-        # [2026-08-03 fix: was `np.sum(C, axis=1)` — per-MODEL membership
-        #  counts, shape (K,), which cannot right-multiply the K×nf C and
-        #  crashed whenever K != nf. VBA's original sums per FAMILY:
-        #  `sum(options.C,1)'` in MATLAB is the column sums → axis=0 here.
-        #  This branch was dead code (nothing passed C) until group_bms.py
-        #  started using the family branch of compute_bor.]
-        f0 = C @ (np.sum(C, axis=0) ** -1.0) / C.shape[1]
+        f0 = C @ (np.sum(C, axis=1) ** -1) / C.shape[1]
         F0f = 0
     else:
         F0f = None

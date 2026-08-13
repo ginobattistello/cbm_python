@@ -277,7 +277,23 @@ config = {
 }
 models = [RL_model, RL2_model]
 
-cbm = hbi_main(all_data, models, cbm_maps, fname=str(OUT_DIR / "hbi_rl.pkl"), config=config)
+# MODIFICATION 11 — pass the per-trial log-likelihoods to HBI too, not just
+# to individual_fit above.
+#
+# HBI refits every subject on its first iteration under the group prior. Without
+# `model_trials` those refits fall back to a finite-difference Hessian, and the
+# Gauss-Newton curvature used for `cbm_maps` above is discarded — the careful
+# fitting on lines 229-238 would be thrown away here. Supplying it keeps the
+# whole pipeline on the same curvature.
+#
+# It is not only about precision: DEV.md §13.3/§14.3 measured a case where the
+# finite-difference refits stalled near the prior mean for several subjects and
+# the group verdict flipped depending on how `cbm_maps` had been produced. With
+# Gauss-Newton refits that dependence disappears.
+model_trials = [RL_model_trials, RL2_model_trials]
+
+cbm = hbi_main(all_data, models, cbm_maps, fname=str(OUT_DIR / "hbi_rl.pkl"),
+               config=config, model_trials=model_trials)
 
 print("\n" + "+" * 70)
 print("HBI Results")

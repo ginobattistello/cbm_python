@@ -1,3 +1,29 @@
+"""
+FROZEN pre-fork snapshot — hbi.py as of commit 93a0be8 (2026-08-13),
+before MODIFICATIONS 11 and 12.
+
+Role
+----
+This is the HBI analogue of `optimization_legacy.py`: an unmodified reference
+copy kept for A/B comparison. **Nothing in the package imports it.** The live,
+modified code is at `cbm/hbi.py` and that is what you want unless you are
+deliberately measuring what Mods 11-12 changed.
+
+Difference from the live version
+--------------------------------
+MOD 11  no `model_trials` parameter, so `hbi_qhquad` calls `optimize_map` with
+        six positional arguments and every internal refit uses the Mod 2
+        finite-difference Hessian, whatever curvature the supplied cbm_maps
+        were fitted with.
+MOD 12  the `OptimizationResult` returned sixth by `optimize_map` is discarded;
+        `IndividualPosterior` has no `diagnostics` field.
+
+Its imports are rewired to the other `*_legacy` modules, so this snapshot is
+self-consistent. Without that it would import the MODIFIED `hbi_qhquad` and
+silently not be legacy behaviour at all.
+
+Used by `benchmark/run_hbi_arms.py` as the `cbm_orig` arm. See DEV.md §14-§15.
+"""
 import os
 import pickle
 from copy import deepcopy
@@ -8,7 +34,7 @@ import numpy as np
 from scipy.special import psi, gammaln
 
 from .hbi_exceedance import cbm_hbi_exceedance
-from .hbi_types import (
+from .hbi_types_legacy import (
     IndividualPosterior,
     ProgressChange,
     ProgressState,
@@ -27,7 +53,7 @@ from .hbi_types import (
 )
 
 from .hbi_config import HBIConfig
-from .hbi_updates import hbi_sumstats, hbi_qmutau, hbi_qm, hbi_qHZ, hbi_qhquad, hbi_bound
+from .hbi_updates_legacy import hbi_sumstats, hbi_qmutau, hbi_qm, hbi_qHZ, hbi_qhquad, hbi_bound
 from .hbi_logging import hbi_log, log_header, log_iteration
 __all__ = ["hbi_run", "hbi_init", "hbi_null", "HBIResult"]
 
@@ -62,7 +88,7 @@ def _hbi_prog(
 
     return prog_change, prog
 
-def hbi_main(data: List[Any], models: List[Any], fcbm_maps: List[str], fname: str = "", config: Union[HBIConfig, Dict[str, Any]] = None, optimconfigs: List[Any] = None, model_trials: List[Any] = None) -> HBIResult:
+def hbi_main(data: List[Any], models: List[Any], fcbm_maps: List[str], fname: str = "", config: Union[HBIConfig, Dict[str, Any]] = None, optimconfigs: List[Any] = None) -> HBIResult:
     """
     Main function to run HBI.
 
@@ -80,40 +106,18 @@ def hbi_main(data: List[Any], models: List[Any], fcbm_maps: List[str], fname: st
         List of optimization configurations for each model.
     fname : str, optional
         Filename to save the resulting CBM object, by default "".
-    model_trials : list, optional
-        MODIFICATION 11. One per-trial log-likelihood function per model,
-        aligned with `models`, or None (the default) to keep the
-        finite-difference behaviour of every earlier version.
-
-        Supplying it puts HBI's internal refits on the Gauss-Newton
-        curvature path (MOD 5). This matters more than it looks: HBI
-        refits every subject on its first iteration, so without this the
-        curvature of the `fcbm_maps` you supply is discarded and the
-        refits fall back to finite differences regardless of how those
-        maps were produced. On a contested comparison that difference
-        inverted the group verdict — see DEV.md §13.3.
-
-        Each entry may itself be None for a model that cannot expose a
-        per-trial decomposition; that model alone then uses the
-        finite-difference fallback.
 
     Returns
     -------
     HBIResult
         The result of the HBI run.
     """
-    if model_trials is not None and len(model_trials) != len(models):
-        raise ValueError(
-            f"model_trials must have one entry per model: got "
-            f"{len(model_trials)} for {len(models)} models. Pass None for "
-            f"any model without a per-trial log-likelihood.")
     user_input = {
         "models": models,
         "fcbm_maps": fcbm_maps,
         "fname": fname,
         "config": config,
         "optimconfigs": optimconfigs,
-        "model_trials": model_trials,
     }
 
     # Hyper (prior) parameters
@@ -140,10 +144,6 @@ def hbi_run(data: List[Any], user_input: Dict[str, Any], inits: Dict[str, Any], 
     fname = user_input.get("fname", None)
     config_in = user_input["config"]
     optconfigs_in = opt_configs
-    # MODIFICATION 11 — .get() rather than [] so a user_input dict built
-    # by older code (or unpickled from before this modification) still
-    # works and simply keeps the finite-difference path.
-    model_trials = user_input.get("model_trials", None)
 
     K = len(models)
     N = len(data)
@@ -220,8 +220,7 @@ def hbi_run(data: List[Any], user_input: Dict[str, Any], inits: Dict[str, Any], 
         qm, bound_qm = hbi_qm(pm, Nbar)
         bound.qm = bound_qm
         bound, _ = hbi_bound(bound, "qm")
-        qhquad = hbi_qhquad(models, data, optconfigs, qmutau, qhquad, fid,
-                            model_trials)
+        qhquad = hbi_qhquad(models, data, optconfigs, qmutau, qhquad, fid)
         r, bound_qHZ = hbi_qHZ(qmutau, qm, qhquad, thetabar, Sdiag)
         bound.qHZ = bound_qHZ
         bound, _ = hbi_bound(bound, "qHZ")

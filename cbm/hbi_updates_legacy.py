@@ -1,9 +1,35 @@
-from typing import Any, Dict, List, Optional, Tuple
+"""
+FROZEN pre-fork snapshot — hbi_updates.py as of commit 93a0be8 (2026-08-13),
+before MODIFICATIONS 11 and 12.
+
+Role
+----
+This is the HBI analogue of `optimization_legacy.py`: an unmodified reference
+copy kept for A/B comparison. **Nothing in the package imports it.** The live,
+modified code is at `cbm/hbi_updates.py` and that is what you want unless you are
+deliberately measuring what Mods 11-12 changed.
+
+Difference from the live version
+--------------------------------
+MOD 11  no `model_trials` parameter, so `hbi_qhquad` calls `optimize_map` with
+        six positional arguments and every internal refit uses the Mod 2
+        finite-difference Hessian, whatever curvature the supplied cbm_maps
+        were fitted with.
+MOD 12  the `OptimizationResult` returned sixth by `optimize_map` is discarded;
+        `IndividualPosterior` has no `diagnostics` field.
+
+Its imports are rewired to the other `*_legacy` modules, so this snapshot is
+self-consistent. Without that it would import the MODIFIED `hbi_qhquad` and
+silently not be legacy behaviour at all.
+
+Used by `benchmark/run_hbi_arms.py` as the `cbm_orig` arm. See DEV.md §14-§15.
+"""
+from typing import Any, Dict, List, Tuple
 import numpy as np
 from scipy.special import psi, gammaln
 from copy import deepcopy
 
-from .hbi_types import (
+from .hbi_types_legacy import (
     IndividualPosterior,
     GaussianGammaDistribution,
     DirichletDistribution,
@@ -229,64 +255,6 @@ def hbi_qHZ(
 
 # hbi_qhquad (moved from hbi_all)
 
-# ══════════════════════════════════════════════════════════════════
-# MODIFICATION 11 — Gauss-Newton curvature reachable from HBI
-#
-# WHAT  `hbi_qhquad` accepts `model_trials`, a per-model list of
-#       per-trial log-likelihood functions, and forwards each to
-#       `optimize_map` as its 7th argument. Supplying it puts HBI's
-#       internal refits on the Mod 5 Gauss-Newton path.
-#
-# WHY   Before this, HBI called `optimize_map` with six positional
-#       arguments. `model_trials` is the seventh, so it was never
-#       passed and every HBI refit used the Mod 2 finite-difference
-#       Hessian — no matter how the supplied `cbm_map` files had been
-#       produced. HBI refits every subject on its first iteration, so
-#       a user who carefully fitted with `model_trials` had that work
-#       silently discarded.
-#
-#       DEV.md §13.3 measured what this costs. On a contested
-#       POW-vs-LIN comparison the finite-difference path stalls at or
-#       near the prior mean for 11 of 60 subjects, one of them 43 nats
-#       worse in log-evidence, and the group verdict inverts
-#       (frequency 0.996 for POW under GN, 0.706 for LIN under FD).
-#
-# BACKWARD COMPATIBILITY  `model_trials=None` — the default, and what
-#       every existing caller passes implicitly — reproduces the old
-#       six-argument call exactly. Verified bit-identical against a
-#       pre-change reference (DEV.md §14.3).
-#
-# REFERENCE  DEV.md §13 (the investigation), §14 (this modification).
-#            VBA does the equivalent in VBA_NLStateSpaceModel, where
-#            the Gauss-Newton curvature is intrinsic rather than opt-in.
-# ══════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════
-# MODIFICATION 12 — HBI surfaces the per-refit diagnostics
-#
-# WHAT  The `OptimizationResult` that `optimize_map` returns sixth is
-#       no longer discarded. Its Mod 9/10 diagnostics are collected
-#       into a (K, N) object array on `IndividualPosterior.diagnostics`.
-#
-# WHY   The old code threw the value away with a comment saying so
-#       ("not yet surfaced in HBI's own result structures"). That left
-#       HBI as the only path in the toolbox with no fit-quality
-#       reporting at all — the group result could rest on subjects
-#       whose individual fits were multimodal or weakly identified,
-#       with nothing in the output to say so.
-#
-#       DEV.md §13.3 showed this is not hypothetical: `n_inits_agreeing`
-#       flagged 58 of 60 subjects on the very comparison whose group
-#       verdict later proved unstable. The signal existed; HBI just
-#       had nowhere to put it.
-#
-# COST  One object array of size K×N. Diagnostics are references to
-#       objects the optimizer already built, so this is bookkeeping,
-#       not computation.
-#
-# REFERENCE  DEV.md §13.5, §14.
-# ══════════════════════════════════════════════════════════════════
-
 def hbi_qhquad(
     models: List[Any],
     data: List[Any],
@@ -294,7 +262,6 @@ def hbi_qhquad(
     qmutau: List[GaussianGammaDistribution],
     qh: IndividualPosterior,
     fid,
-    model_trials: Optional[List[Optional[Any]]] = None,
 ) -> IndividualPosterior:
     N = len(data)
     K = len(models)
@@ -306,10 +273,6 @@ def hbi_qhquad(
     logf = np.zeros((K, N), dtype=float)
     flag = np.zeros((K, N), dtype=int)
     logdetA = np.zeros((K, N), dtype=float)
-    # MOD 12 — one slot per (model, subject); stays all-None when the
-    # optimizer returns no diagnostics, so the field is always shaped
-    # the same regardless of path.
-    diagnostics = np.empty((K, N), dtype=object)
     for k in range(K):
         a_k = np.asarray(qmutau[k].a)
         Etau_k = np.asarray(qmutau[k].Etau)
@@ -318,18 +281,14 @@ def hbi_qhquad(
         cfg = deepcopy(pconfig[k])
         theta_k = np.zeros((Dk, N), dtype=float)
         Ainvdiag_k = np.zeros((Dk, N), dtype=float)
-        # MOD 11 — None for this model means the finite-difference
-        # fallback, i.e. exactly the pre-modification behaviour.
-        mt_k = None if model_trials is None else model_trials[k]
         for n in range(N):
             cfg.inits = qh.parameters[k][:, n]
             from .map_estimation import optimize_map, log_posterior
-            # optimize_map returns 6 values as of 2026-08-03 (DEV.md §4);
-            # the trailing OptimizationResult carries the Mod 9/10
-            # diagnostics, kept by Mod 12 below.
-            logf_kn, theta_kn, A_kn, _, flag_kn, res_kn = optimize_map(
-                data[n], models[k], cfg, prior.mean.flatten(),
-                prior.precision, 'LAP', mt_k
+            # optimize_map returns 6 values as of 2026-08-03 (DEV.md §4):
+            # the trailing OptimizationResult carries per-fit diagnostics;
+            # not yet surfaced in HBI's own result structures.
+            logf_kn, theta_kn, A_kn, _, flag_kn, _ = optimize_map(
+                data[n], models[k], cfg, prior.mean.flatten(), prior.precision, 'LAP'
             )
             if flag_kn == 0:
                 theta_kn = prior.mean.flatten()
@@ -338,13 +297,6 @@ def hbi_qhquad(
             logf[k, n] = logf_kn
             theta_k[:, n] = theta_kn
             flag[k, n] = flag_kn
-            # MOD 12 — `diagnostics` is a METHOD on OptimizationResult
-            # (it builds the record on demand and copies the arrays), so
-            # it must be called. A bare getattr returns the bound method
-            # and stores that instead, which fails only later at the
-            # point of use — hence the explicit callable check.
-            diag_fn = getattr(res_kn, "diagnostics", None)
-            diagnostics[k, n] = diag_fn() if callable(diag_fn) else None
             cholA = np.linalg.cholesky(A_kn)
             logdetA_kn = 2.0 * np.sum(np.log(np.diag(cholA)))
             Ainv = np.linalg.inv(A_kn)
@@ -357,7 +309,6 @@ def hbi_qhquad(
         parameters=theta_list,
         hessian_inv_diag=Ainvdiag_list,
         log_det_hessian=logdetA,
-        diagnostics=diagnostics,
     )
     return qh_new
 

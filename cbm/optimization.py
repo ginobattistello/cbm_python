@@ -28,6 +28,15 @@ OVERVIEW OF MODIFICATIONS
   9  post-fit diagnostics  — raw min eigenvalue, clip count, cross-init
                              agreement, hard-bound mask; surfaced via
                              PostFitDiagnostics → FitMath.diagnostics
+ 10  weak-identifiability  — min curvature eigenvalue vs prior
+                             precision; warns below ratio 2.0
+─────────────────────────────────────────────────────────────────
+Modifications 11-12 live in cbm/hbi.py + cbm/hbi_updates.py, not in
+this file, because they concern the hierarchical layer:
+ 11  model_trials threaded through hbi_main → hbi_run → hbi_qhquad,
+     so HBI's internal refits can use Mod 5's Gauss-Newton curvature
+ 12  HBI keeps the per-refit diagnostics it used to discard, on
+     IndividualPosterior.diagnostics
 ─────────────────────────────────────────────────────────────────
 Modifications 2-4 are interdependent and should be applied together:
   • Mod 2 guarantees a positive-definite Hessian for Mod 3's Newton step
@@ -99,6 +108,12 @@ class ConvergenceStatus(str, Enum):
 # accept-paths below. Every member MUST appear here — a KeyError on a
 # new member is the desired failure mode (forces a deliberate decision
 # rather than a silent default).
+# MODIFICATION 10 — threshold for the weak-identifiability warning,
+# expressed as a multiple of the prior precision. Calibrated on 360 fits;
+# the full justification lives at the warning site in `optimize`.
+# Raising it flags more fits (higher recall, lower precision).
+WEAK_IDENTIFIABILITY_RATIO = 2.0
+
 FLAG_FROM_STATUS = {
     ConvergenceStatus.CONVERGED_DF: 1.0,
     ConvergenceStatus.NO_IMPROVEMENT: 1.0,
@@ -343,6 +358,10 @@ class OptimizationResult:
     hess_n_clipped: Optional[int] = None
     n_inits_agreeing: Optional[int] = None
     at_hard_bounds: Optional[np.ndarray] = None
+    # Mod 10: smallest curvature eigenvalue as a multiple of the prior
+    # precision. Below WEAK_IDENTIFIABILITY_RATIO the fit is flagged as
+    # weakly identified. None on the Mod 2 fallback (see Mod 10 block).
+    weak_identifiability: Optional[float] = None
 
     # ══════════════════════════════════════════════════════════════
     # MODIFICATION 8 — Sign/naming coherence (DEV.md §3)
@@ -402,6 +421,7 @@ class OptimizationResult:
             n_runs=self.n_runs,
             at_hard_bounds=(self.at_hard_bounds.tolist()
                             if self.at_hard_bounds is not None else None),
+            weak_identifiability=self.weak_identifiability,
         )
 
 
@@ -424,6 +444,7 @@ class PostFitDiagnostics:
     n_inits_agreeing: Optional[int]
     n_runs: int
     at_hard_bounds: Optional[list]
+    weak_identifiability: Optional[float] = None
 
 
 class BFGSOptimizer:
@@ -1240,6 +1261,80 @@ class BFGSOptimizer:
                 "approximation assumes an interior optimum, so the "
                 "evidence for this fit is unreliable (Mod 9, DEV.md §4).")
 
+        # ══════════════════════════════════════════════════════════
+        # MODIFICATION 10 — Weak-identifiability warning
+        # ──────────────────────────────────────────────────────────
+        # WHAT
+        #   Compare the smallest curvature eigenvalue against the PRIOR
+        #   precision. If the data added little curvature relative to
+        #   the prior in the weakest direction, the posterior there is
+        #   essentially the prior: the parameter is weakly identified
+        #   and its estimate should not be interpreted.
+        #
+        # WHY a RATIO, not an absolute floor
+        #   min_eig is the curvature of the log-posterior, so it grows
+        #   with the amount of data. Measured on RL at alpha=0.5:
+        #   T=50 -> 1.44, T=150 -> 5.46, T=450 -> 14.6. An absolute
+        #   threshold would therefore flag every small study and miss
+        #   every large one. Dividing by the prior precision removes the
+        #   scale and gives the quantity a meaning: "how much more does
+        #   the data know than the prior did?"
+        #
+        # WHY the threshold is 2 (calibrated 2026-08-12, n=360 fits over
+        # RL alpha 0.001-0.999 x T 60/150/300)
+        #   ratio band   median |error|   fits with |error| > 0.15
+        #     0-2            0.206              53%
+        #     2-5            0.045              12%
+        #     5-20           0.066              25%
+        #     20-100         0.051               7%
+        #   corr(log ratio, |error|) = -0.38, vs -0.27 for the raw
+        #   eigenvalue — the ratio is the better predictor.
+        #   At ratio < 2: precision 0.53, recall 0.48.
+        #
+        # HONEST LIMITS — read before trusting it
+        #   WHAT IT PREDICTS is error in the UNCONSTRAINED (theta) space,
+        #   which is the space this curvature refers to. Validated on an
+        #   18-cell boundary sweep (2026-08-12): AUC 0.824 on RL and 0.766
+        #   on POW (out of sample — the threshold was calibrated on RL
+        #   only), versus ~0.5 for n_inits_agreeing and abs_grad. Flagged
+        #   fits carry 4.7x (RL) / 5.2x (POW) the median theta-error.
+        #   Against error in the NATIVE space (alpha, rho) it is near
+        #   chance on RL, and that is expected rather than a defect: as
+        #   alpha -> 1 the sigmoid saturates, so a large theta error maps
+        #   to a tiny alpha error. A parameter can be badly identified in
+        #   the fitting space while its transformed estimate still looks
+        #   close to truth. Read the warning as "this parameter is poorly
+        #   constrained", not as "this number is far from the truth".
+        #
+        #   Precision ~0.5 means about half of flagged fits are fine.
+        #   This is a TRIAGE signal ("look at this one"), not a
+        #   rejection rule, and it is deliberately a warning rather than
+        #   an error: §4's principle is that a check flags or stops, and
+        #   stopping here would discard usable fits. Recall ~0.5 also
+        #   means it misses half of the bad fits — a fit can be wrong
+        #   for reasons that leave curvature healthy (multimodality,
+        #   which n_inits_agreeing covers instead).
+        #
+        # Only computed on the Gauss-Newton path: there `prior_precision`
+        # is known exactly and enters H by construction. On the Mod 2
+        # fallback the eigenvalues were already clipped, so the raw
+        # spectrum is not comparable to a prior scale.
+        weak_identifiability = None
+        if prior_precision is not None and hess_diag["raw_min_eig"] is not None:
+            pp = np.asarray(prior_precision, dtype=float)
+            pp_min = float(np.linalg.eigvalsh(pp).min()) if pp.ndim == 2 else float(pp)
+            if pp_min > 0:
+                weak_identifiability = float(hess_diag["raw_min_eig"] / pp_min)
+                if weak_identifiability < WEAK_IDENTIFIABILITY_RATIO:
+                    warnings.warn(
+                        "Weakly identified fit: the smallest curvature "
+                        f"eigenvalue is only {weak_identifiability:.2f}x the "
+                        "prior precision, so the data barely constrain the "
+                        "weakest parameter direction and the posterior there "
+                        "is close to the prior. Treat the affected estimate "
+                        "as unreliable (Mod 10; triage signal, precision "
+                        "~0.5 — see the block in optimization.py).")
+
         # ── 4d. Convergence flag from explicit status (Mod 6) ────
         # Explicit table lookup — see FLAG_FROM_STATUS for why this
         # must never be a truthiness or identity test on the status.
@@ -1265,7 +1360,8 @@ class BFGSOptimizer:
             hess_raw_min_eig=hess_diag["raw_min_eig"],
             hess_n_clipped=hess_diag["n_clipped"],
             n_inits_agreeing=n_inits_agreeing,
-            at_hard_bounds=at_hard_bounds
+            at_hard_bounds=at_hard_bounds,
+            weak_identifiability=weak_identifiability
         )
     #
     # ──────────────────────────────────────────────────────────────────

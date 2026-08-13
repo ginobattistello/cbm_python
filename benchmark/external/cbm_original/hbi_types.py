@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import numpy as np
 
 @dataclass
@@ -8,11 +8,6 @@ class IndividualPosterior:
     parameters: List[np.ndarray]
     hessian_inv_diag: List[np.ndarray]
     log_det_hessian: np.ndarray
-    # MODIFICATION 12 — (K, N) object array of PostFitDiagnostics from
-    # each refit, or None where the optimizer reported none. Optional
-    # with a None default so pickles written before Mod 12 still load
-    # (HBI results are routinely saved to disk and re-read by hbi_null).
-    diagnostics: Optional[np.ndarray] = None
 
 @dataclass
 class ProgressChange:
