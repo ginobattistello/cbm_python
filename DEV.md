@@ -10,7 +10,8 @@ holds **only** regression/verification harnesses, kept alongside the code they c
 `convergence_status_verify.py` for §2.2's status enum (Mod 6), done 2026-08-03;
 `checks_verify.py` for §3's Mods 1/7/8 + §4's three-layer checks (Mod 9 + pre-flight),
 done 2026-08-03; `group_bms_verify.py` for §5's promoted `cbm/group_bms.py`, 2026-08-03;
-`hbi_verify.py` for §14's Mods 11/12 in the hierarchical layer, 2026-08-13).
+`hbi_verify.py` for §14's Mods 11/12 in the hierarchical layer, 2026-08-13;
+`reporting_verify.py` for §16's Mod 13 readable output, 2026-08-13).
 The last work-in-progress module (`group_bms.py`) was promoted to `cbm/`.
 **Separately, `benchmark/`** holds workstream 5's three-arm robustness benchmark (§8) —
 its own harnesses, the vendored pristine-CBM arm, and the MATLAB VBA driver; it is not
@@ -225,8 +226,17 @@ Five annotated modifications now exist in `cbm/optimization.py`:
 | 11 | `model_trials` threaded `hbi_main` → `hbi_run` → `hbi_qhquad`, so HBI's internal refits can reach Mod 5's Gauss-Newton curvature | Active, opt-in — added 2026-08-13, see §14 |
 | 12 | HBI keeps the per-refit `PostFitDiagnostics` it previously discarded, on `IndividualPosterior.diagnostics` | Active — added 2026-08-13, see §14 |
 
+| 13 | Readable output — `summary()` / `table()` / `__repr__` on **every** result type (`FitResult`, `HBIResult`, `GroupBMSResult`, `BtwConds`, `BtwGroups`), plus `FitResult.se` | Active — added 2026-08-13, see §16 |
+| 14 | Display options — `Config.display`, optimizer trace/warning capture, `predict=`/`observed=`, and `FitResult.plot()` | Active, **opt-in** — added 2026-08-14, see §17 |
+| 15 | Default prior — `prior_mean`/`prior_variance` optional, defaulting to N(0, 6.25) in θ-space; recorded on the result, announced in the warning, header, summary and figure | Active — added 2026-08-14, see §18 |
+
 Mods 1–10 live in `cbm/optimization.py`; **11–12 live in `cbm/hbi.py` and
-`cbm/hbi_updates.py`** — they concern the hierarchical layer, not the optimizer.
+`cbm/hbi_updates.py`** (the hierarchical layer, not the optimizer); **13 lives
+in `cbm/reporting.py`** and is presentation only — it reads existing fields and
+is never called during fitting. **14 spans `optimization.py` (capture),
+`individual_fit.py` (plumbing) and `cbm/display.py` (figures)**, and is the only
+modification that touches the optimizer purely for presentation — gated behind
+`Config.display`, off by default.
 
 The `MODIFICATION n — WHAT / WHY / REFERENCE` comment convention is good. **Keep it.**
 It is the single best transparency asset in the repo — the manual can be generated from it.
@@ -1540,3 +1550,503 @@ between a stable group verdict and one that depends on an arbitrary upstream
 choice. Since a user cannot know in advance which case they are in, passing
 `model_trials` to `hbi_main` is the right default — but the honest summary is
 "insurance that pays out on some datasets", not "uniformly better".
+
+---
+
+## 16. MODIFICATION 13 — readable output (2026-08-13)
+
+**Why it exists.** Everything a user needs was already on `FitResult`, spread
+across four branches, and `print(fit)` dumped the raw dataclass — the first
+several hundred characters are `config` and prior arrays, with the estimates
+somewhere after. Three concrete costs:
+
+1. Nobody printed these objects, so people indexed `.output.parameters` and
+   never discovered the rest.
+2. **No standard error anywhere in the output.** A MAP fit without one is half
+   an answer. The information was in `math.hessian_inv_diag`, but nothing said
+   its square root is the posterior SD.
+3. **MOD 9/10 diagnostics did not surface.** Convergence status, multimodality
+   and weak identifiability were computed per subject and reported nowhere. A
+   user who did not know they existed got no signal when a fit was bad.
+
+### 16.1 What was added
+
+Every result type the toolbox returns now prints as a table:
+
+| result | from | API |
+|---|---|---|
+| `FitResult` | `individual_fit` | `summary()` · `table()` · `se` |
+| `HBIResult` | `hbi_main` | `summary()` · `table()` · `subject_table()` |
+| `GroupBMSResult` | `group_bms` | `summary()` · `table()` |
+| `BtwCondsResult` | `group_bms_btw_conds` | `summary()` |
+| `BtwGroupsResult` | `group_bms_btw_groups` | `summary()` |
+
+All formatting lives in `cbm/reporting.py`; each result class gains thin
+methods that delegate to it.
+
+**Purely additive.** No existing field changes and nothing here runs during
+fitting or inference, so a broken formatter cannot affect a result.
+
+**pandas is now a hard dependency** (2026-08-13, at the user's direction).
+`table()` returns a DataFrame; `pandas=False` still gives the underlying list
+of dicts for JSON or DataFrame-averse code. Declared in `pyproject.toml`,
+which previously declared *no* dependencies at all — numpy and scipy were
+always required but never listed, so they were added at the same time.
+
+### 16.2 Design decisions worth recording
+
+**Theta is printed, not native parameters.** `output.parameters` is the
+unconstrained space the optimizer works in. The toolbox cannot know your
+parameterisation, and silently guessing would be worse than printing theta and
+saying so — every table labels columns `theta[i]` and the summary carries a
+two-line note. A `transform=` argument was considered and **deliberately not
+built**: it invites the toolbox to assert something about your model that it
+cannot verify.
+
+**Single subject is a first-class case, not a special case.**
+`individual_fit` already keeps `parameters` two-dimensional for n=1, so
+`table()` needs no branch — it returns one row. `summary()` does branch, on
+purpose: for one subject it prints estimate / SE / 95% CI, because a "mean and
+SD across subjects" over a single subject is meaningless.
+
+**`__repr__` can never raise.** It wraps `summary()` in a try/except that falls
+back to a short tag. A formatting bug must not make a result object
+unprintable — that would turn a cosmetic problem into an apparently lost fit.
+Harness check 5 pins this by corrupting a result and calling `repr`.
+
+**Plain monospace, no box drawing.** The summary is meant to paste into an
+email, a GitHub comment or a lab notebook, so it uses spaces and `=` rules
+only. Checks 7a-b pin the absence of box characters and an 80-column limit.
+
+**`log_joint`, not `loglik`, in the table.** `FitMath.loglik` actually stores
+the log *joint* (likelihood + prior) — documented in its docstring but a real
+trap. The exported column is renamed; the underlying field keeps its name for
+backward compatibility with existing pickles.
+
+### 16.3 The quality column
+
+One coarse word per subject, from the MOD 9/10 records:
+
+| value | meaning |
+|---|---|
+| `ok` | nothing flagged |
+| `weak` | weak identifiability ratio < 2 (MOD 10) |
+| `multimodal` | `n_inits_agreeing == 0` — restarts disagreed |
+| `bounds` | a parameter sits at a hard bound |
+| `singular` | singular Hessian at the optimum (flag 0.5) |
+| `prior` | fit failed, prior substituted |
+
+Intentionally coarse: it exists to make a problem *visible* to someone
+skimming. The full record stays on `fit.math.diagnostics[i]`, and the summary
+says so rather than implying the word is the whole story.
+
+Verified against the boundary grid (alpha = 0.001), where §11 established the
+fits are weakly identified: 7 of 12 subjects flagged `weak`, visible per
+subject without the user having heard of MOD 10.
+
+### 16.4 Verification
+
+`cbm/dev/reporting_verify.py`, 22 checks, all passing. Self-contained — it
+generates its own data rather than reading `benchmark/data/`.
+
+Check 1 is the important one: it snapshots every numeric output, exercises
+`summary()`, `table()`, `.se` and `repr()`, then confirms **max delta
+0.000e+00**. The rest pin single-subject behaviour, SE = sqrt(diag(H^-1))
+exactly, DataFrame shape and columns, repr-never-raises on a corrupted result
+for *every* type, diagnostic surfacing, the high-BOR warning, and copy-paste
+safety (no box characters, ≤ 80 columns).
+
+`HBIResult` is exercised by `hbi_verify.py`, which already constructs one —
+duplicating that setup here would double the harness runtime for no coverage.
+
+Regression suite unchanged: all six harnesses pass, `baseline_snapshot
+--compare` **UNCHANGED** at tol 1e-8, both examples run clean.
+
+### 16.5 The other result types
+
+Each got its own layout rather than a copy of the fit one, because the
+quantity a reader wants differs.
+
+**HBI.** There is no single "the estimate" — there is a population frequency
+per model and an assignment per subject. The summary leads with a model
+comparison table (frequency, exceedance, protected xp, subjects best fit),
+names the most frequent model, and **attaches the caveat when xp < 0.95**
+rather than letting a 0.6 read as a winner. Model names come from
+`__name__` on the model functions, so they appear automatically. Protected xp
+is NaN until `hbi_null` runs; the summary says "not computed — run
+hbi_null()" instead of printing a bare NaN. MOD 12 diagnostics are aggregated
+into a fit-quality block; when they are absent it points at `model_trials=`.
+`subject_table()` gives one row per subject with `p(model)` per candidate,
+the argmax, and that subject's parameters under its own best model.
+
+**group_bms.** The summary gives the per-model table and then **states the
+Bayes Omnibus Risk with an interpretation**. This is the one number people
+skip, and skipping it is how a decisive-looking `xp = 1.000` gets reported
+when the BOR is 0.94 and the models are actually indistinguishable. Above
+0.25 the summary says so in words and points at pxp. Harness check 9 pins
+that the warning fires exactly when the BOR is high.
+
+**Between-conditions / between-groups.** Both end with a plain-language
+verdict rather than leaving the reader to interpret a free-energy difference.
+The between-groups non-rejection explicitly says "absence of evidence, not
+evidence of absence" — the standard misreading of that test.
+
+### 16.6 A bug the harness caught
+
+`FitResult.table()` kept the old `pandas: Optional[bool] = None` default after
+`reporting.table` switched to `pandas: bool = True`. `None` is falsy, so
+`if not pandas` returned a list of dicts even though pandas was installed —
+a silent wrong-type bug with no error anywhere. Check 4a (assert the return
+is a DataFrame indexed by subject) failed immediately and located it.
+
+Worth noting because the earlier version of check 4 tested the *fallback*
+behaviour and would have passed: it only asserted that dicts come back when
+pandas is missing. Tightening the check to assert the positive case is what
+found it.
+
+### 16.7 Still open
+
+- Native-space output remains the user's job by design (§16.2).
+- `WithinFamilyResult` / `FamilyResult` have no summary yet; they are reached
+  through `GroupBMSResult.families` and would want a nested layout.
+
+---
+
+## 17. MODIFICATION 14 — display options (2026-08-14)
+
+Maps the intent of VBA's display options (`options.DisplayWin`,
+`VBA_initDisplay`) onto this toolbox. Not a port: VBA runs its own
+Gauss-Newton loop and can show a clean per-iteration trace, whereas here the
+bulk of the work happens inside scipy's L-BFGS-B.
+
+### 17.1 The API
+
+```python
+fit = individual_fit(data, objective, prior_mean, prior_var,
+                     model_trials=objective_trials,
+                     predict=lambda p, d: my_model(p, d[0]),   # optional
+                     observed=lambda d: d[1],                   # optional
+                     config=dict(display=True))
+fit.plot()              # group figure (or per-subject when n == 1)
+fit.plot(subject=3)     # force the per-subject figure
+fit.plot(save="d.png")  # write it
+```
+
+| piece | where |
+|---|---|
+| `Config.display` | `optimization.py` — off by default |
+| trace capture | `optimization.py` — `search_path/_f`, `polish_path/_f/_lme` |
+| warning capture, `predict`/`observed` | `individual_fit.py` |
+| the figures | `cbm/display.py` |
+
+**matplotlib is an optional extra**, imported lazily inside `plot()`. `import
+cbm` and every fit work without it; the harness pins this.
+
+### 17.2 Zero cost when off
+
+`display=False` (the default) retains **nothing** — the tracing branches never
+run, `_display_data` is never set. Verified bit-identical, `baseline_snapshot
+--compare` UNCHANGED, and ~3% overhead when it *is* on (5.26s → 5.43s on 10
+subjects).
+
+### 17.3 Three things the figures are honest about
+
+These are the substance of the modification; the panels exist to communicate
+them rather than to look busy.
+
+**1. Trajectories are function EVALUATIONS, not iterations.** `search_path` is
+every point L-BFGS-B evaluated, including line-search probes, so the path
+zigzags and can shoot far out before settling. Axes say "function evaluations
+(not iterations)"; the y-axis clips to the 2–98% range when an early probe
+would otherwise flatten the region where the fit converges, and says it
+clipped.
+
+**2. A per-step log-evidence exists ONLY for the Newton polish.** The Laplace
+evidence needs `|H|`, and `_newton_polish` is the only loop that recomputes H
+at every step — during L-BFGS-B there is no Hessian, so no evidence exists for
+those evaluations. Panel C therefore plots the log-JOINT over the search and
+the log-EVIDENCE over the polish as two separate things, never one curve.
+Harness check 10f pins that the last polish value equals the reported
+log-evidence, which is what makes the curve the same quantity as the result.
+
+Two rendering corrections came out of actually looking at this panel:
+  - sharing the x-axis stretched 2 polish steps across 35 evaluations, making
+    a 1e-10 change look like a sweep. The evidence now lives in an inset with
+    its own x-axis.
+  - plotting absolute log-evidence over near-identical steps produced the
+    offset label `1e-6 − 1.0496e2`, unreadable. It now plots the **change from
+    the first step**, y-labelled `Δ from -104.959`, so "the evidence moved by
+    six millionths" is the immediate reading. A genuinely flat trace is
+    labelled `flat (1.9e-10)` rather than autoscaled into drama.
+
+**3. Without `predict=`/`observed=` there is no residual to compute.** `data`
+is opaque to the toolbox — it may be `(X, y)`, `(choices, rewards)`, anything.
+So panel A falls back to per-trial log-likelihood, titles itself "no
+predict/observed", and points at the two arguments. `individual_fit` **also
+warns once at fit time**, so the user learns before waiting for the fit rather
+than after. Choice models generally cannot supply these meaningfully, so the
+fallback is a first-class path, not a degraded one.
+
+### 17.4 Layout
+
+**One subject** — 2×2 plus a full-width status strip:
+
+| | |
+|---|---|
+| A observed vs predicted (R², RMSE), or per-trial log-lik | B parameter path, band = final ±1 SE |
+| C objective evolution (log-joint + evidence inset) | D estimates ±95% CI |
+| E status · cost · warnings — full width | |
+
+**Many subjects** — 2×2, no trajectories (twenty overlaid zigzags say
+nothing): parameter distributions, log-evidence, fit-quality counts, cost.
+`plot()` dispatches on n, so a one-subject fit never shows a "distribution" of
+one point.
+
+E merges status and warnings into one strip, at the user's request.
+
+### 17.5 Warnings are copied, never intercepted
+
+Capturing per-subject warnings needs `catch_warnings(record=True)`, which
+would otherwise **suppress warnings the user's own code expects to see**. So
+every captured warning is immediately re-emitted with `warn_explicit`; the
+recording is a copy. Known-noise warnings (scipy's `disp`/`iprint`
+deprecation, one per L-BFGS-B call) are filtered at *display* time only —
+they are still recorded and still re-emitted.
+
+### 17.6 Deliberately not built: live plotting
+
+"Dynamic" here means the figure is built from what the fit actually did, not
+that it updates during the fit. Live updating needs a matplotlib callback per
+function evaluation: it roughly triples fit time and breaks headless runs —
+which is what the benchmark and all six harnesses are. Post-hoc `plot()` shows
+the same information at no cost to batch work. A live flag for interactive
+single-subject use would be a separate, additive change.
+
+### 17.7 Verification
+
+`cbm/dev/reporting_verify.py` grew from 22 to **33 checks**. The display ones:
+
+| check | pins |
+|---|---|
+| 10a/b | `display=False` is bit-identical AND retains nothing |
+| 10c | the fallback notice fires exactly once, at fit time |
+| 10d | `display=True` does not change the fit |
+| 10e | traces retained when on |
+| 10f | last polish log-evidence == reported log-evidence |
+| 10g/h | both figures render |
+| 10i | `plot()` without display raises an *actionable* message |
+| 10j/k | no notice when predict/observed given; figure renders |
+
+Check 10i found a real gap: `plot_group` did not call `_require_display`, so a
+multi-subject non-display result failed obscurely instead of explaining
+itself. Fixed.
+
+All six harnesses pass, baseline UNCHANGED, all four examples clean, and
+`import cbm` works with matplotlib blocked.
+
+### 17.8 Showing a window vs saving a file
+
+`plot()` takes both `save=path` and `show=True`; they are independent.
+
+**`show=True` is non-blocking** (`plt.show(block=False)` plus a short
+`plt.pause`). A plain blocking `plt.show()` per figure means a script drawing
+two figures shows the second only after you dismiss the first — which reads
+like the second never appeared. The cost is that a bare script would exit and
+take the windows with it, so `example_display.py` ends with one blocking
+`plt.show()`. Not needed in Jupyter, `python -i`, or an IDE that keeps the
+interpreter alive.
+
+**On a non-interactive backend, `show=True` warns.** Under `Agg` (headless,
+CI, SSH without X) no window is possible; the figure is still created and
+`save=` still works. Warning rather than silence matters because "nothing
+popped up" is otherwise indistinguishable from a broken plot. Pinned by
+harness check 10l.
+
+The toolbox never calls `matplotlib.use()` — your own configuration applies.
+(The benchmark scripts do force `Agg`, but they are separate programs.)
+
+### 17.9 The `html` backend — why not pyqtgraph or Plotly
+
+**Question asked (2026-08-14): make the display agnostic to matplotlib's
+backend; is pyqtgraph or Plotly the better route?**
+
+Neither, as it turned out.
+
+**pyqtgraph is not backend-agnostic — it IS a backend.** It requires Qt
+(PyQt5/6 or PySide6) and renders to a Qt window, so adopting it trades
+"depends on matplotlib's backend" for "depends on Qt being installed". Qt was
+not present in this environment. It also has no good notebook story.
+
+**Plotly would be genuinely portable** (it renders HTML, no GUI toolkit) but
+costs a *parallel implementation of every panel* that has to stay in sync with
+the matplotlib one, a ~50 MB optional dependency, and `kaleido` on top for
+static export — whose PDF output is materially worse than matplotlib's for the
+publication figures this repo already produces (§10, §15).
+
+**What was built instead:** `backend="html"`. The SAME matplotlib figure is
+rendered to PNG, embedded as a base64 data URI in a small self-contained page,
+and opened with `webbrowser`.
+
+```python
+fit.plot(subject=0)                    # matplotlib window, as before
+fit.plot(subject=0, backend="html")    # browser — works anywhere
+fit.plot(backend="html", html_path="fit.html")
+```
+
+| | matplotlib window | `backend="html"` |
+|---|---|---|
+| needs a GUI toolkit | yes | **no** |
+| headless / SSH / CI | impossible | **works** |
+| new dependencies | — | **none** |
+| figure definitions to maintain | 1 | **still 1** |
+| interactivity | pan/zoom via the toolkit | none (static image) |
+
+The trade-off is stated rather than hidden: no hover or zoom. A
+`backend="plotly"` renderer could be added alongside later if interactivity
+becomes necessary — this design does not preclude it, and keeping the
+publication path on matplotlib means such an addition would be purely
+additive.
+
+Implementation notes: the page carries a `prefers-color-scheme` block so it is
+readable in a dark browser, and the image is a data URI rather than a sidecar
+file so a single artifact can be emailed or copied off a cluster.
+`_open_browser` is a module-level function specifically so the harness can
+substitute it — a verification run must not spawn browser tabs on the
+developer's desktop. Checks 11a-g pin all of this **under Agg**, which is the
+point: if the HTML path works where no window can possibly open, it is
+genuinely independent of the backend.
+
+### 17.10 Examples
+
+`examples/example_display.py` is the minimal one — a straight line
+`y = 2x - 1 + noise`, 8 subjects, so nothing about the model competes with the
+figures. It also carries the two checks worth copying into real scripts:
+that `model_trials` sums to the scalar objective at several parameter values,
+and that `display=True` leaves the fit unchanged (both come back 0.0e+00).
+
+`examples/example_regression.py` shows the same feature inside a wider
+discussion (profiled vs estimated sigma, curvature selection).
+
+### 17.11 Still open
+
+- No display for `HBIResult` / `GroupBMSResult`. Their `summary()` exists
+  (§16); a figure would want its own layout (frequencies, exceedance,
+  responsibility heatmap) rather than a copy of this one.
+- `display=True` keeps a reference to `data` so `plot()` can recompute
+  predictions. Deliberate — the alternative is copying every dataset — but a
+  display result holds the data alive.
+
+---
+
+## 18. MODIFICATION 15 — default prior (2026-08-14)
+
+**Prompted by** VBA's `core/VBA_defaultPriors.m`, which supplies a prior when
+none is given. Before this, `prior_mean` and `prior_variance` were required
+positional arguments, so every example and harness hard-coded the same numbers
+with no stated justification.
+
+### 18.1 Why NOT VBA's value
+
+VBA defaults to **N(0, I)** — unit variance. Copying that number would be a
+mistake, because the two toolboxes put priors on different things. VBA's
+parameters are often near natural scale; this toolbox fits in **unconstrained
+θ-space**, where models typically map `α = sigmoid(θ)` and `β = exp(θ)`.
+
+What N(0, v) implies in native space (95% interval):
+
+| v | SD | α = sigmoid(θ) | β = exp(θ) |
+|---:|---:|---|---|
+| **1.00** | 1.00 | [0.123, 0.877] | [0.14, 7.1] |
+| **6.25** | 2.50 | [0.007, 0.993] | [0.007, 134] |
+| 10.00 | 3.16 | [0.002, 0.998] | [0.002, 492] |
+
+**Variance 1 is a strong prior here** — it excludes learning rates below 0.12,
+which are perfectly plausible. It would import an assumption that does not
+transfer between the two parameterisations.
+
+**Chosen: 6.25 (SD 2.5)**, from Piray et al. 2019 — the CBM paper this toolbox
+implements, so the value has a citation rather than being invented. The `10`
+previously hard-coded in the examples is looser still and, as far as the code
+shows, unsourced.
+
+### 18.2 It is not silent, because the prior moves the result
+
+Measured on the benchmark RL cell, 20 subjects:
+
+| prior variance | mean α* | mean log β | Σ log-evidence |
+|---:|---:|---:|---:|
+| 1.00 | −0.3415 | 0.6021 | −2356.81 |
+| 6.25 | −0.3104 | 0.6228 | −2375.11 |
+| 10.00 | −0.2830 | 0.6223 | −2382.47 |
+| 100.00 | −0.1306 | 0.6187 | −2423.20 |
+
+**66 nats of evidence** across that range. A default that changes results by
+that much must announce itself, so it is surfaced in four places: a
+`UserWarning`, the verbose header, `FitInput.prior_defaults` on the result
+object, and both `summary()` and the figure.
+
+Documented as *weakly informative*, never as neutral. VBA's docstring calls its
+Gamma prior a "Jeffreys prior"; in unconstrained θ-space no Gaussian is truly
+uninformative, so claiming neutrality would be wrong.
+
+### 18.3 How `d` is found without a new argument
+
+The requirement was no extra parameter. `d` normally comes from
+`len(prior_mean)` — unavailable when the mean is omitted.
+
+**Solution: read it from `config.d`.** `Config` requires `d` already, so a
+caller who omits the prior has usually stated the dimension anyway:
+
+```python
+individual_fit(data, model, config=dict(d=2))      # both defaulted
+individual_fit(data, model, np.zeros(2))            # variance defaulted
+individual_fit(data, model, np.zeros(2), 10.0)      # unchanged
+```
+
+**Probing the model was tried and REJECTED.** Calling it with growing `d` until
+it stops raising works for models that index `p[0]`, `p[1]` — but returns the
+wrong answer silently for two ordinary patterns:
+
+| model | true d | probe says |
+|---|---:|---:|
+| `float(np.sum(p))` | 3 | **1** |
+| uses only `p[0]` but declares 2 | 2 | **1** |
+
+A wrong `d` would fit the wrong model without erroring. When neither the mean
+nor `config.d` is available the toolbox **raises with instructions** rather
+than guessing.
+
+### 18.4 Where it shows up
+
+- **warning** — names which fields were defaulted, the value, the implied SD,
+  and the citation
+- **verbose header** — `Prior: N(mean [0. 0.], variance 6.25)  [DEFAULT: ...]`,
+  printed whether or not it was defaulted
+- **`FitInput`** — `prior_variance` (the precision is its inverse and a matrix,
+  so the original scalar is not recoverable) and `prior_defaults`
+- **`summary()`** — a Prior block; compact when uniform, per-parameter when it
+  varies
+- **the figure** — a Prior row across the bottom of the subject plot's status
+  strip, since a figure showing a posterior without its prior is missing half
+  the recipe
+
+`reporting.prior_spec(result)` normalises scalar / vector / full-covariance
+into one variance per parameter, so callers do not each re-implement it.
+
+### 18.5 Verification
+
+`reporting_verify.py` 41 → **48 checks**. The important one is 12a: an explicit
+prior is **unwarned, records no defaults, and is bit-identical** to before
+(delta 0.0e+00). Also pinned: both-defaulted with `d` from config, the value is
+N(0, 6.25), variance-only defaulting keeps the supplied mean, the missing-`d`
+error is actionable, and the prior reaches both `summary()` and the figure.
+
+All six harnesses pass, baseline UNCHANGED, all five examples clean.
+
+### 18.6 Still open
+
+- HBI has its own prior machinery (`hbi_main`'s hyperparameters `b`, `v`, `s`)
+  and is untouched by this.
+- The examples still pass `10` explicitly. Left alone deliberately: changing
+  them would alter their printed output for no benefit, and they now serve as
+  worked cases of an explicit prior.

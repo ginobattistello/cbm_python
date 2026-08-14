@@ -9,7 +9,7 @@ to multiple subjects using Laplace approximation (MAP estimation).
 import numpy as np
 import pickle
 from typing import Callable, Optional, List, Any, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import warnings
 import time
@@ -133,6 +133,14 @@ class FitInput:
     prior_mean: np.ndarray
     prior_precision: np.ndarray
     fname: Optional[str]
+    # MODIFICATION 15 — the prior VARIANCE as supplied (the precision
+    # above is its inverse, and a matrix, so the original scalar/vector
+    # is not recoverable from it for display).
+    prior_variance: Optional[np.ndarray] = None
+    # Which of ("prior_mean", "prior_variance") the toolbox filled in.
+    # Empty when the caller supplied both. Recorded on the RESULT, not
+    # just warned about, so a saved fit still says how it was priored.
+    prior_defaults: tuple = ()
 
 @dataclass
 class FitProfile:
@@ -184,21 +192,192 @@ class FitResult:
         profile: Profile and input information
         math: Mathematical details
         output: Main output (parameters and log_evidence)
+
+    Readable output (MODIFICATION 13, DEV.md §16):
+        print(fit)      compact summary table
+        fit.summary()   the same table as a string
+        fit.table()     per-subject DataFrame (or list of dicts)
+        fit.se          posterior standard errors, (n_subjects, d)
     """
     method: str
     input: FitInput
     profile: FitProfile
     math: FitMath
     output: FitOutput
+    # MODIFICATION 14 — set by individual_fit only when display=True;
+    # holds {data, predict, observed, model_trials} for plot(). Excluded
+    # from repr/compare so it cannot clutter output or affect equality.
+    _display_data: Optional[dict] = field(default=None, repr=False,
+                                          compare=False)
+
+    # ── MODIFICATION 13 — readable output ────────────────────────────
+    # Everything below is presentation only. It reads fields that already
+    # exist, is never called during fitting, and adds no dependency: the
+    # table falls back to a list of dicts when pandas is absent. A bug in
+    # this code cannot change a fit.
+
+    def summary(self, max_subjects: int = 12) -> str:
+        """Compact, copy-pasteable text summary. See cbm.reporting."""
+        from .reporting import summary as _summary
+        return _summary(self, max_subjects=max_subjects)
+
+    def table(self, pandas: bool = True):
+        """Per-subject table as a DataFrame (pandas=False for dicts).
+
+        Works for a single-subject fit too — `parameters` stays
+        two-dimensional, so you simply get a one-row table.
+        """
+        from .reporting import table as _table
+        return _table(self, pandas=pandas)
+
+    def plot(self, subject: Optional[int] = None, backend: str = "auto",
+             **kwargs):
+        """Diagnostic figure (MODIFICATION 14, DEV.md §17).
+
+        Requires the fit to have been run with `config=dict(display=True)`;
+        raises a ValueError explaining why if not, since the optimizer
+        retains nothing otherwise.
+
+        subject=None  group figure for a multi-subject fit, per-subject
+                      figure when only one subject was fitted
+        subject=i     force the per-subject figure
+
+        backend="html" renders the same figure into a self-contained HTML
+        page and opens it in a browser — independent of which matplotlib
+        backend is active, so it works headless and over SSH. Default
+        "auto" keeps the matplotlib behaviour.
+
+        Extra keyword arguments go to the underlying plotter: `save=path`
+        writes the figure, `show=True` opens a matplotlib window,
+        `html_path=path` chooses where the HTML page is written.
+        """
+        from .display import plot as _plot
+        return _plot(self, subject=subject, backend=backend, **kwargs)
+
+    @property
+    def se(self) -> np.ndarray:
+        """Posterior standard errors in theta space, (n_subjects, d).
+
+        sqrt(diag(H^-1)) under the Laplace approximation. Exposed as a
+        property because it is the single most-requested quantity that
+        the raw result does not name anywhere.
+        """
+        from .reporting import standard_errors
+        return standard_errors(self)
+
+    def __repr__(self) -> str:
+        # The default dataclass repr dumps config and prior arrays before
+        # reaching the estimates, which is why nobody printed these objects.
+        try:
+            return self.summary()
+        except Exception as e:                       # never mask a result
+            return (f"<FitResult {self.method!r} "
+                    f"(summary failed: {type(e).__name__}: {e})>")
+
+
+# ══════════════════════════════════════════════════════════════════
+# MODIFICATION 15 — default prior (DEV.md §18)
+# ──────────────────────────────────────────────────────────────────
+# VBA supplies a default prior when none is given (VBA_defaultPriors.m:
+# N(0, I) on parameters). This toolbox required both `prior_mean` and
+# `prior_variance` on every call, so every example and harness hard-coded
+# the same numbers with no stated justification.
+#
+# WHY NOT VBA'S VARIANCE OF 1. The two toolboxes put priors on different
+# things. VBA's unit variance sits on parameters at roughly natural
+# scale; this toolbox fits in UNCONSTRAINED theta-space, where models
+# typically map alpha = sigmoid(theta) and beta = exp(theta). What N(0,v)
+# implies in native space:
+#
+#     v      SD    alpha = sigmoid(theta)   beta = exp(theta)
+#     1.00  1.00   [0.123, 0.877]           [0.14,   7.1]
+#     6.25  2.50   [0.007, 0.993]           [0.007, 134]
+#    10.00  3.16   [0.002, 0.998]           [0.002, 492]
+#
+# Variance 1 is a STRONG prior here — it excludes learning rates below
+# 0.12, which are perfectly plausible. Copying VBA's number would import
+# an assumption that does not transfer.
+#
+# THE VALUE CHOSEN: 6.25 (SD 2.5), from Piray et al. 2019 — the CBM paper
+# this toolbox implements. Weakly informative rather than neutral: in
+# unconstrained space no Gaussian is truly uninformative, so this is
+# documented as an assumption, never claimed as an absence of one.
+#
+# NOT SILENT. The prior measurably moves results (on the benchmark RL
+# cell, summed log-evidence spans 66 nats between v=1 and v=100), so a
+# default is announced — in a warning, in the verbose header, on
+# `FitInput`, and in `summary()`.
+DEFAULT_PRIOR_VARIANCE = 6.25          # SD 2.5; Piray et al. 2019
+DEFAULT_PRIOR_MEAN = 0.0               # per parameter, in theta-space
+
+
+def _resolve_prior(prior_mean, prior_variance, config, model_name):
+    """Fill in whichever of (mean, variance) was not supplied.
+
+    Returns (prior_mean, prior_variance, defaults_used) where
+    `defaults_used` is a tuple of the field names that were defaulted.
+
+    HOW `d` IS OBTAINED WITHOUT A NEW ARGUMENT. Normally `d` comes from
+    `len(prior_mean)`. When the mean is omitted it is read from
+    `config.d`, which `Config` requires anyway — so a caller who omits
+    the prior has already stated the dimension by passing a config.
+
+    Probing the model (calling it with growing d until it stops raising)
+    was tried and REJECTED: it silently returns the wrong answer for two
+    ordinary patterns — a model summing over all parameters, or one that
+    happens to index only the first. A wrong `d` would fit the wrong
+    model without erroring, which is far worse than asking for a config.
+    """
+    used = []
+
+    if prior_variance is None:
+        prior_variance = DEFAULT_PRIOR_VARIANCE
+        used.append("prior_variance")
+
+    if prior_mean is None:
+        d_cfg = None
+        if config is not None:
+            d_cfg = (config.get("d") if isinstance(config, dict)
+                     else getattr(config, "d", None))
+        if d_cfg is None:
+            raise ValueError(
+                "prior_mean was not given and the number of parameters "
+                "could not be determined. Either pass prior_mean (e.g. "
+                "np.zeros(3)), or state the dimension in the config: "
+                "config=dict(d=3). The toolbox cannot infer it — `model` "
+                "is an opaque callable, and probing it for a parameter "
+                "count is unreliable (see MODIFICATION 15).")
+        prior_mean = np.full(int(d_cfg), DEFAULT_PRIOR_MEAN, dtype=float)
+        used.append("prior_mean")
+
+    if used:
+        d = len(np.ravel(prior_mean))
+        v = prior_variance
+        v_txt = (f"{float(v):g}" if np.isscalar(v)
+                 else np.array2string(np.ravel(np.asarray(v)),
+                                      precision=3))
+        warnings.warn(
+            f"{model_name}: using the DEFAULT prior for "
+            f"{' and '.join(used)} — N(mean 0, variance {v_txt}) on each "
+            f"of {d} parameter(s), in unconstrained theta-space "
+            f"(SD {np.sqrt(float(np.mean(v))):.2f}; Piray et al. 2019). "
+            f"This is a weakly informative assumption, not an absence of "
+            f"one, and it does affect the estimates and the evidence. "
+            f"Pass prior_mean/prior_variance explicitly to choose your "
+            f"own (MODIFICATION 15, DEV.md §18).",
+            UserWarning, stacklevel=3)
+    return prior_mean, prior_variance, tuple(used)
 
 
 def individual_fit(data: List[Any],
                    model: Callable[[np.ndarray, Any], float],
-                   prior_mean: np.ndarray,
-                   prior_variance: np.ndarray | float,
+                   prior_mean: Optional[np.ndarray] = None,
+                   prior_variance: Optional[np.ndarray | float] = None,
                    fname: Optional[str] = None,
                    config: Optional[Union[Config, dict]] = None,
-                   model_trials: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None
+                   model_trials: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None,
+                   predict: Optional[Callable[[np.ndarray, Any], np.ndarray]] = None,
+                   observed: Optional[Callable[[Any], np.ndarray]] = None
                    ) -> FitResult:
     """
     Individual subject fitting using Laplace approximation.
@@ -216,6 +395,21 @@ def individual_fit(data: List[Any],
             given, the Hessian/evidence at each subject's MAP uses the
             VBA-style Gauss-Newton curvature (see optimization.py Mod 5)
             instead of the finite-difference/eigenvalue-clip fallback.
+        predict: MODIFICATION 14, display only. `predict(theta, data) ->
+            y_hat`, the model's predicted outcome for one subject. Used
+            solely by `FitResult.plot()` to draw observed-vs-predicted;
+            it never enters the fit.
+        observed: MODIFICATION 14, display only. `observed(data) -> y`,
+            pulling the measured outcome out of one subject's data (e.g.
+            `lambda d: d[1]`). Needed alongside `predict`, because `data`
+            is opaque to the toolbox — it may be (X, y), (choices,
+            rewards), or anything else.
+
+            With `config=dict(display=True)` but WITHOUT these two, the
+            plot falls back to per-trial log-likelihood and warns once,
+            naming both arguments. Choice models generally cannot supply
+            them meaningfully, so the fallback is a first-class path, not
+            a degraded one.
 
     Returns:
         Tuple of (cbm, success) where:
@@ -223,10 +417,18 @@ def individual_fit(data: List[Any],
     """
     # Setup
     N = len(data)  # Number of subjects
-    d = len(prior_mean)  # Number of parameters
+
+    # MODIFICATION 15 — fill in a default prior for whichever of
+    # (mean, variance) is missing. Runs before `d` is read, since the
+    # mean is what defines it.
+    prior_mean, prior_variance, prior_defaults = _resolve_prior(
+        prior_mean, prior_variance, config,
+        getattr(model, "__name__", "model"))
+
+    d = len(np.ravel(prior_mean))  # Number of parameters
 
     prior = Prior(
-        mean=prior_mean,
+        mean=np.asarray(prior_mean, dtype=float).reshape(-1),
         variance=prior_variance  # prior variances
     )
 
@@ -257,7 +459,17 @@ def individual_fit(data: List[Any],
         print(f"{'individual_fit':<40}{start_time.strftime('%Y-%m-%d %H:%M:%S'):>30}")
         print("=" * 70)
         print(f"Number of samples: {N}")
-        print(f"Number of parameters: {d}\n")
+        print(f"Number of parameters: {d}")
+        # Mod 15 — the prior is a modelling choice that moves the result,
+        # so state it in the header whether or not it was defaulted.
+        _pv = prior_variance
+        _pv_txt = (f"{float(_pv):g}" if np.isscalar(_pv)
+                   else np.array2string(np.ravel(np.asarray(_pv)),
+                                        precision=3))
+        _tag = ("  [DEFAULT: " + ", ".join(prior_defaults) + "]"
+                if prior_defaults else "")
+        print(f"Prior: N(mean {np.array2string(np.ravel(prior.mean), precision=3)}, "
+              f"variance {_pv_txt}){_tag}\n")
         print(f"Number of initializations: {config.num_init}")
         print("-" * 70)
 
@@ -265,6 +477,22 @@ def individual_fit(data: List[Any],
     # subject-0-only probe: dims, PD prior, and per-subject model
     # evaluation at the prior mean. Raises on unfittable inputs.
     _preflight_checks(data, model, prior, config)
+
+    # ── MODIFICATION 14 — display fallback notice ────────────────────
+    # Warn at FIT time, not at plot time: the user should learn what the
+    # figure will be missing before waiting for the fit, not after. Once
+    # per call, never per subject.
+    if getattr(config, "display", False) and (predict is None
+                                              or observed is None):
+        missing = [n for n, v in (("predict", predict),
+                                  ("observed", observed)) if v is None]
+        warnings.warn(
+            f"display=True without {' and '.join(missing)}: the "
+            f"observed-vs-predicted panel will fall back to per-trial "
+            f"log-likelihood. Pass predict(theta, data) -> y_hat and "
+            f"observed(data) -> y to get the residual plot "
+            f"(Mod 14, DEV.md §17).",
+            UserWarning, stacklevel=2)
 
     # Initialize storage
     flags = np.full(N, np.nan)
@@ -289,12 +517,33 @@ def individual_fit(data: List[Any],
 
         # Create optimizer for this subject
 
-        # Call optimize_map for this subject
-        loglik_n, parameters_n, hessian_n, grad_n, flag_n, result_n = optimize_map(
-            dat, model, config, prior.mean.flatten(), prior.precision, method='LAP',
-            model_trials=model_trials
-        )
+        # Call optimize_map for this subject.
+        #
+        # MOD 14 — when display is on, record this subject's warnings so
+        # the status panel can show them. They are RE-EMITTED immediately
+        # afterwards, so capturing never hides a warning from the user or
+        # from their own warning filters; the recording is a copy, not an
+        # interception. When display is off there is no wrapper at all.
+        if getattr(config, "display", False):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                (loglik_n, parameters_n, hessian_n, grad_n, flag_n,
+                 result_n) = optimize_map(
+                    dat, model, config, prior.mean.flatten(),
+                    prior.precision, method='LAP', model_trials=model_trials)
+            subject_warnings = [str(w.message) for w in caught]
+            for w in caught:
+                warnings.warn_explicit(w.message, w.category, w.filename,
+                                       w.lineno)
+        else:
+            subject_warnings = None
+            (loglik_n, parameters_n, hessian_n, grad_n, flag_n,
+             result_n) = optimize_map(
+                dat, model, config, prior.mean.flatten(), prior.precision,
+                method='LAP', model_trials=model_trials)
         diag_n = result_n.diagnostics()
+        if subject_warnings is not None:
+            diag_n.warnings = subject_warnings
 
         # Handle failed optimization
         if flag_n == 0:
@@ -335,7 +584,9 @@ def individual_fit(data: List[Any],
         model_name=model.__name__ if hasattr(model, '__name__') else str(model),
         prior_mean=prior.mean,
         prior_precision=prior.precision,        
-        fname=fname
+        fname=fname,
+        prior_variance=prior_variance,          # Mod 15
+        prior_defaults=prior_defaults
     )
 
     profile_info = FitProfile(
@@ -374,6 +625,21 @@ def individual_fit(data: List[Any],
         math=math_details,
         output=output
     )
+
+    # ── MODIFICATION 14 — display payload ────────────────────────────
+    # What plot() needs that is not already on the result: the data
+    # itself, and the two optional accessors. Held on a private attribute
+    # rather than a dataclass field so it never enters `asdict()`, never
+    # gets pickled by accident, and cannot be mistaken for a fit output.
+    #
+    # NOTE this keeps a reference to `data`. That is deliberate — the
+    # alternative is copying every subject's dataset — but it means a
+    # display=True result holds the data alive. Off by default, so the
+    # usual path is unaffected.
+    if getattr(config, "display", False):
+        cbm._display_data = dict(data=data, predict=predict,
+                                 observed=observed,
+                                 model_trials=model_trials)
 
     # Save if filename provided
     if fname is not None:

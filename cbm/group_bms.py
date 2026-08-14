@@ -154,6 +154,24 @@ class GroupBMSResult(_DictShim):
             return self
         return super().__getitem__(key)
 
+    # ── MODIFICATION 13 — readable output (DEV.md §16). Presentation
+    # only; reads existing fields, never called during inference.
+    def summary(self, model_names=None) -> str:
+        from .reporting import bms_summary
+        return bms_summary(self, model_names=model_names)
+
+    def table(self, model_names=None, pandas: bool = True):
+        """One row per model: frequency, exceedance, protected xp, alpha."""
+        from .reporting import bms_table
+        return bms_table(self, model_names=model_names, pandas=pandas)
+
+    def __repr__(self) -> str:
+        try:
+            return self.summary()
+        except Exception as e:
+            return (f"<GroupBMSResult "
+                    f"(summary failed: {type(e).__name__}: {e})>")
+
 
 @dataclass
 class BestTuple(_DictShim):
@@ -188,6 +206,18 @@ class BtwCondsResult(_DictShim):
     best: BestTuple
     btw: GroupBMSResult
     per_cond: List[GroupBMSResult]
+
+    # ── MODIFICATION 13 — readable output (DEV.md §16).
+    def summary(self) -> str:
+        from .reporting import btw_conds_summary
+        return btw_conds_summary(self)
+
+    def __repr__(self) -> str:
+        try:
+            return self.summary()
+        except Exception as e:
+            return (f"<BtwCondsResult "
+                    f"(summary failed: {type(e).__name__}: {e})>")
 
 
 @dataclass
@@ -225,6 +255,18 @@ class BtwGroupsResult(_DictShim):
     per_group: List[GroupBMSResult]
 
     _ALIASES = {"p": "p_equal", "h": "h_reject_equality"}
+
+    # ── MODIFICATION 13 — readable output (DEV.md §16).
+    def summary(self) -> str:
+        from .reporting import btw_groups_summary
+        return btw_groups_summary(self)
+
+    def __repr__(self) -> str:
+        try:
+            return self.summary()
+        except Exception as e:
+            return (f"<BtwGroupsResult "
+                    f"(summary failed: {type(e).__name__}: {e})>")
 
 
 # ═══════════════════════════════════════════════════════════════════

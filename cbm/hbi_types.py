@@ -136,11 +136,42 @@ class HBIOutput:
 
 @dataclass
 class HBIResult:
+    """Result of a hierarchical Bayesian inference run.
+
+    Readable output (MODIFICATION 13, DEV.md §16):
+        print(result)             compact summary table
+        result.summary()          the same table as a string
+        result.table()            one row per model
+        result.subject_table()    one row per subject, with responsibilities
+    """
     method: str
     input: HBIInput
     profile: HBIProfile
     math: HBIMath
     output: HBIOutput
+
+    # ── MODIFICATION 13 — presentation only; reads existing fields,
+    # never called during inference. See cbm/reporting.py.
+    def summary(self, max_models: int = 12) -> str:
+        from .reporting import hbi_summary
+        return hbi_summary(self, max_models=max_models)
+
+    def table(self, pandas: bool = True):
+        """Model-level table: frequency, exceedance, attributed subjects."""
+        from .reporting import hbi_table
+        return hbi_table(self, pandas=pandas)
+
+    def subject_table(self, pandas: bool = True):
+        """Subject-level table: p(model) per candidate plus the best fit."""
+        from .reporting import hbi_subject_table
+        return hbi_subject_table(self, pandas=pandas)
+
+    def __repr__(self) -> str:
+        try:
+            return self.summary()
+        except Exception as e:
+            return (f"<HBIResult {self.method!r} "
+                    f"(summary failed: {type(e).__name__}: {e})>")
 
 @dataclass
 class ExceedanceResult:

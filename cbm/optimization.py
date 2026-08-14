@@ -200,6 +200,12 @@ class Config:
     prior_for_failed: bool = True
     verbose: bool = True
     save_data: bool = False
+    # MODIFICATION 14 — display. Off by default: when False the optimizer
+    # retains nothing extra, so the cost is exactly zero for every existing
+    # caller. When True it keeps the L-BFGS-B evaluation path, the Newton
+    # polish trace and any warnings raised during the fit, which is what
+    # FitResult.plot() draws. See DEV.md §17.
+    display: bool = False
 
     def __post_init__(self):
         """Set defaults based on dimension."""
@@ -362,6 +368,21 @@ class OptimizationResult:
     # precision. Below WEAK_IDENTIFIABILITY_RATIO the fit is flagged as
     # weakly identified. None on the Mod 2 fallback (see Mod 10 block).
     weak_identifiability: Optional[float] = None
+    # ── Mod 14 (display=True only; None otherwise) ────────────────
+    # search_path: every point L-BFGS-B EVALUATED on the winning run,
+    #   (n_evals, d). These are function evaluations including
+    #   line-search probes, NOT clean iterations — the path zigzags, and
+    #   the display labels the axis accordingly.
+    # search_f: the objective at each of those points, sign-flipped to
+    #   log-joint (Mod 8: the optimizer minimises the negative).
+    # polish_path / polish_f / polish_lme: the Newton-polish steps.
+    #   polish_lme is the ONLY place a genuine per-step log-evidence
+    #   exists, because it is the only loop that recomputes H each step.
+    search_path: Optional[np.ndarray] = None
+    search_f: Optional[np.ndarray] = None
+    polish_path: Optional[np.ndarray] = None
+    polish_f: Optional[np.ndarray] = None
+    polish_lme: Optional[np.ndarray] = None
 
     # ══════════════════════════════════════════════════════════════
     # MODIFICATION 8 — Sign/naming coherence (DEV.md §3)
@@ -422,6 +443,11 @@ class OptimizationResult:
             at_hard_bounds=(self.at_hard_bounds.tolist()
                             if self.at_hard_bounds is not None else None),
             weak_identifiability=self.weak_identifiability,
+            # Mod 14 — kept as arrays (not lists): they can run to a few
+            # hundred rows and only exist when display=True anyway.
+            search_path=self.search_path, search_f=self.search_f,
+            polish_path=self.polish_path, polish_f=self.polish_f,
+            polish_lme=self.polish_lme,
         )
 
 
@@ -445,6 +471,18 @@ class PostFitDiagnostics:
     n_runs: int
     at_hard_bounds: Optional[list]
     weak_identifiability: Optional[float] = None
+    # Mod 14 — optimizer traces, populated only when Config.display is
+    # True. See OptimizationResult for what each one holds and the
+    # important caveat that search_path is function EVALUATIONS, not
+    # iterations.
+    search_path: Optional[np.ndarray] = None
+    search_f: Optional[np.ndarray] = None
+    polish_path: Optional[np.ndarray] = None
+    polish_f: Optional[np.ndarray] = None
+    polish_lme: Optional[np.ndarray] = None
+    # Mod 14 — warnings raised while fitting THIS subject, recorded by
+    # individual_fit when display=True (and re-emitted, never swallowed).
+    warnings: Optional[list] = None
 
 
 class BFGSOptimizer:
@@ -477,6 +515,11 @@ class BFGSOptimizer:
         self.range_bounds = config.range_bounds
         self.hard_bounds = config.hard_bounds
         self.inits = config.inits
+        # Mod 14 — getattr so a Config built by older code (or unpickled
+        # from before this modification) still constructs.
+        self.display = bool(getattr(config, "display", False))
+        self._display = False
+        self._temp_polish_trace = None
         self.gtol = gtol
         self.ftol = ftol
 
@@ -753,11 +796,30 @@ class BFGSOptimizer:
         status = None          # set by exactly one exit path (Mod 6)
         tol_df = 1e-4          # relative free-energy tolerance
 
+        # MODIFICATION 14 — polish trace. Only here is a per-step LOG-EVIDENCE
+        # actually available: the Laplace evidence needs |H|, and this loop is
+        # the only place H is recomputed at every step. During L-BFGS-B there
+        # is no Hessian, so no evidence exists for those evaluations — the
+        # display panel plots the two segments separately rather than
+        # pretending one curve spans the whole fit.
+        trace = [] if getattr(self, "_display", False) else None
+
         for _ in range(n_steps):
             H = self.compute_hessian(neg_log_post, x,
                                       trial_func=trial_func,
                                       prior_precision=prior_precision)
             g = approx_fprime(x, neg_log_post, 1e-5)
+
+            if trace is not None:
+                # lme = −f + (d/2)·log(2π) − ½·log|H|  (Mod 8 sign
+                # convention: f is the NEGATIVE log joint).
+                try:
+                    sign, logdet = np.linalg.slogdet(H)
+                    lme_step = (-f_current + 0.5 * self.d * np.log(2 * np.pi)
+                                - 0.5 * logdet) if sign > 0 else np.nan
+                except np.linalg.LinAlgError:
+                    lme_step = np.nan
+                trace.append((x.copy(), float(f_current), float(lme_step)))
 
             try:
                 dx = np.linalg.solve(H, g)       # Newton direction
@@ -828,6 +890,23 @@ class BFGSOptimizer:
                 f"objective rose from {f_entry!r} to {f_current!r}. "
                 "This indicates a bug or a non-deterministic objective; "
                 "results cannot be trusted (DEV.md §3/§4).")
+
+        # MOD 14 — record the final state too, so the trace ends at the
+        # accepted optimum rather than at the last point BEFORE the last
+        # accepted step. Stashed on self; optimize() moves it onto the
+        # winning run's result.
+        if trace is not None:
+            try:
+                H = self.compute_hessian(neg_log_post, x,
+                                         trial_func=trial_func,
+                                         prior_precision=prior_precision)
+                sign, logdet = np.linalg.slogdet(H)
+                lme_end = (-f_current + 0.5 * self.d * np.log(2 * np.pi)
+                           - 0.5 * logdet) if sign > 0 else np.nan
+            except np.linalg.LinAlgError:
+                lme_end = np.nan
+            trace.append((x.copy(), float(f_current), float(lme_end)))
+            self._temp_polish_trace = trace
 
         return x, f_current, status
     #
@@ -1187,6 +1266,12 @@ class BFGSOptimizer:
         self.history_x = best_history_x
         self.history_f = best_history_f
 
+        # MOD 14 — arm the polish trace for this fit only. Read by
+        # _newton_polish; left unset (falsy) when display is off, so the
+        # tracing branch there never runs.
+        self._display = bool(getattr(self, "display", False))
+        self._temp_polish_trace = None
+
         # ── 4c. Newton polish (requires Mod 3) ───────────────────
         f_before_polish = best_result.f
         best_result.x, best_result.f, status = (
@@ -1346,6 +1431,24 @@ class BFGSOptimizer:
                 f"{status.value}); accepting the L-BFGS-B optimum "
                 "with flag=0.5.")
 
+        # MOD 14 — attach the traces, but only when display is on. The
+        # arrays are built here rather than during the fit so the hot loop
+        # stays untouched; when display is off every field below is None
+        # and nothing was retained in the first place.
+        s_path = s_f = p_path = p_f = p_lme = None
+        if self._display:
+            if best_history_x:
+                s_path = np.asarray(best_history_x, dtype=float)
+                # Mod 8: the optimizer minimises −log joint; flip the sign
+                # so the display plots something that goes UP as the fit
+                # improves, which is what a reader expects.
+                s_f = -np.asarray(best_history_f, dtype=float)
+            tr = getattr(self, "_temp_polish_trace", None)
+            if tr:
+                p_path = np.asarray([t[0] for t in tr], dtype=float)
+                p_f = -np.asarray([t[1] for t in tr], dtype=float)
+                p_lme = np.asarray([t[2] for t in tr], dtype=float)
+
         return OptimizationResult(
             x=best_result.x, f=best_result.f, hess=hess,
             grad=best_result.grad, flag=flag,
@@ -1361,7 +1464,9 @@ class BFGSOptimizer:
             hess_n_clipped=hess_diag["n_clipped"],
             n_inits_agreeing=n_inits_agreeing,
             at_hard_bounds=at_hard_bounds,
-            weak_identifiability=weak_identifiability
+            weak_identifiability=weak_identifiability,
+            search_path=s_path, search_f=s_f,
+            polish_path=p_path, polish_f=p_f, polish_lme=p_lme
         )
     #
     # ──────────────────────────────────────────────────────────────────
