@@ -8,7 +8,6 @@ to multiple subjects using Laplace approximation (MAP estimation).
 
 import numpy as np
 import pickle
-from typing import Callable, Optional, List, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 import warnings
