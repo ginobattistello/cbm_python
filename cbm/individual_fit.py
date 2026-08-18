@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import warnings
 import time
-
+from typing import Any, List, Optional
 from .map_estimation import optimize_map, log_posterior
 from .optimization import BFGSOptimizer, Config, PostFitDiagnostics
 
