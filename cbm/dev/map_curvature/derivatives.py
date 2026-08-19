@@ -54,6 +54,37 @@ def finite_difference_gradient(fun, x, eps=1e-6):
     return g
 
 
+
+def original_cbm_hessian(fun, x, epsilon=1e-5):
+    """Reproduce the original CBM Python Hessian estimator.
+
+    This follows payampiray/cbm_python/cbm/optimization.py:
+      1. scipy.optimize.approx_fprime(x, fun, epsilon)
+      2. for each parameter i, evaluate the same forward-difference gradient
+         at x + epsilon * e_i
+      3. finite-difference those gradients with the same fixed epsilon
+      4. symmetrize
+
+    This is intentionally kept separate from `finite_difference_hessian`,
+    which is the proposed direct central-FD observed Hessian.
+    """
+    from scipy.optimize import approx_fprime
+
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    H = np.zeros((n, n), dtype=float)
+
+    grad_x = approx_fprime(x, fun, epsilon)
+
+    for i in range(n):
+        x_step = x.copy()
+        x_step[i] += epsilon
+        grad_step = approx_fprime(x_step, fun, epsilon)
+        H[i, :] = (grad_step - grad_x) / epsilon
+
+    return 0.5 * (H + H.T)
+
+
 def finite_difference_hessian(fun, x, eps=1e-4):
     """Central finite-difference Hessian of a scalar objective.
 

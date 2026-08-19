@@ -162,3 +162,38 @@ The summary is designed to answer:
 4. How different is the current GN curvature from the observed Hessian?
 5. Does AD improve the MAP optimization?
 6. How much would the curvature choice change the local Laplace term?
+
+
+## Original-CBM evidence-Hessian comparison
+
+The experiment now also reproduces the evidence Hessian from the original
+`payampiray/cbm_python` optimizer:
+
+    grad_x = scipy.optimize.approx_fprime(x, objective, 1e-5)
+
+    for i:
+        grad_step = approx_fprime(x + 1e-5 * e_i, objective, 1e-5)
+        H[i, :] = (grad_step - grad_x) / 1e-5
+
+    H = (H + H.T) / 2
+
+The original implementation then checks positive definiteness and uses this
+Hessian in the Laplace evidence when the fit is retained.
+
+For a controlled comparison, this experiment evaluates that original-CBM
+Hessian at the exact same GN-polished MAP as:
+
+- the proposed central-FD observed Hessian,
+- the AD observed Hessian,
+- the GN optimization curvature.
+
+It reports:
+
+- original-CBM FD vs AD relative Hessian error,
+- original-CBM FD vs new central-FD relative error,
+- positive-definite rate of the original estimator,
+- `logE_original - logE_AD`,
+- `logE_original - logE_new_FD`.
+
+Because all evidence values use the same dataset, MAP, and objective, these
+differences isolate the curvature estimator itself.

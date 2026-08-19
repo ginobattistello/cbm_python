@@ -25,6 +25,7 @@ from .derivatives import (
     negative_log_posterior_jax,
     finite_difference_gradient,
     finite_difference_hessian,
+    original_cbm_hessian,
     gn_curvature,
     autodiff_gradient_hessian,
     compare_hessians,
@@ -72,14 +73,20 @@ class RunRecord:
     # Curvature comparison at exactly the same MAP
     gn_ad_rel_fro_error: float
     fd_ad_rel_fro_error: float
+    original_ad_rel_fro_error: float
+    original_fd_rel_fro_error: float
 
     gn_logdet: float
+    original_logdet: float
     fd_logdet: float
     ad_logdet: float
 
     gn_min_eig: float
+    original_min_eig: float
     fd_min_eig: float
     ad_min_eig: float
+
+    original_is_pd: bool
 
     fd_h001_rel_error: float
     fd_h0001_rel_error: float
@@ -95,9 +102,12 @@ class RunRecord:
     # Curvature contribution to the Laplace approximation.
     # Same MAP and same objective for all three methods.
     laplace_logevidence_gn: float
+    laplace_logevidence_original: float
     laplace_logevidence_fd: float
     laplace_logevidence_ad: float
     laplace_gn_minus_ad: float
+    laplace_original_minus_ad: float
+    laplace_original_minus_fd: float
     laplace_fd_minus_ad: float
 
 
@@ -128,6 +138,13 @@ def _laplace_logevidence(objective_map, H):
         Delta = -0.5 * Delta log(det(H)).
     """
     H = _sym(H)
+    # Laplace requires a locally positive-definite precision matrix.
+    # This also mirrors the original CBM's explicit Cholesky acceptance check.
+    try:
+        np.linalg.cholesky(H)
+    except np.linalg.LinAlgError:
+        return np.nan
+
     sign, logdet = np.linalg.slogdet(H)
     if sign <= 0:
         return np.nan
@@ -249,6 +266,12 @@ def run_one(
         prior_precision=prior_precision,
     )
 
+    # Original CBM evidence Hessian, reproduced exactly at the same MAP:
+    # nested forward finite differences with a fixed epsilon=1e-5.
+    original_t0 = time.perf_counter()
+    H_original = original_cbm_hessian(objective, theta_map, epsilon=1e-5)
+    original_hessian_seconds = time.perf_counter() - original_t0
+
     fd_results = {}
     fd_errors = {}
     for eps in fd_steps:
@@ -259,6 +282,8 @@ def run_one(
         fd_errors[eps] = _relative_error(H_fd, H_ad)
 
     gn_error = compare_hessians(H_gn, H_ad)["relative_frobenius_error"]
+    original_ad_error = _relative_error(H_original, H_ad)
+    original_fd_error = _relative_error(H_original, fd_results[1e-4][0])
 
     # h=1e-4 is retained as the conventional FD summary, but all step sizes
     # are stored so stability can be checked explicitly.
@@ -268,6 +293,7 @@ def run_one(
     # 4. Curvature-only effect on the Laplace term at the SAME MAP.
     # ------------------------------------------------------------------
     le_gn = _laplace_logevidence(fit.objective, H_gn)
+    le_original = _laplace_logevidence(fit.objective, H_original)
     le_fd = _laplace_logevidence(fit.objective, H_fd_summary)
     le_ad = _laplace_logevidence(fit.objective, H_ad)
 
@@ -297,17 +323,22 @@ def run_one(
         "theta_probe": theta_probe,
         "gradient_norm_map_fd": float(np.linalg.norm(g_map_fd)),
         "H_gn": H_gn,
+        "H_original": H_original,
         "H_ad": H_ad,
         "H_fd": {eps: value[0] for eps, value in fd_results.items()},
         "H_fd_seconds": {eps: value[1] for eps, value in fd_results.items()},
         "ad_hessian_seconds": ad_hessian_seconds,
+        "original_hessian_seconds": original_hessian_seconds,
         "gn_ad_error": gn_error,
+        "original_ad_error": original_ad_error,
+        "original_fd_error": original_fd_error,
         "fd_ad_errors": fd_errors,
         "objective_jax_error_map": objective_error_map,
         "objective_jax_error_probe": objective_error_probe,
         "gradient_errors": gradient_errors,
         "ad_gradient_norm_probe": float(np.linalg.norm(g_ad_probe)),
         "laplace_logevidence_gn": le_gn,
+        "laplace_logevidence_original": le_original,
         "laplace_logevidence_fd": le_fd,
         "laplace_logevidence_ad": le_ad,
         "dataset": dataset,
@@ -379,12 +410,17 @@ def run_experiment(
                 grad_h0000001_rel_error=ge[1e-7],
                 gn_ad_rel_fro_error=result["gn_ad_error"],
                 fd_ad_rel_fro_error=fd_err[1e-4],
+                original_ad_rel_fro_error=result["original_ad_error"],
+                original_fd_rel_fro_error=result["original_fd_error"],
                 gn_logdet=_logdet(H_gn),
+                original_logdet=_logdet(result["H_original"]),
                 fd_logdet=_logdet(fd[1e-4]),
                 ad_logdet=_logdet(H_ad),
                 gn_min_eig=_min_eig(H_gn),
+                original_min_eig=_min_eig(result["H_original"]),
                 fd_min_eig=_min_eig(fd[1e-4]),
                 ad_min_eig=_min_eig(H_ad),
+                original_is_pd=bool(_min_eig(result["H_original"]) > 0.0),
                 fd_h001_rel_error=fd_err[1e-3],
                 fd_h0001_rel_error=fd_err[1e-4],
                 fd_h00001_rel_error=fd_err[1e-5],
@@ -395,11 +431,20 @@ def run_experiment(
                 fd_h000001_seconds=result["H_fd_seconds"][1e-6],
                 ad_hessian_seconds=result["ad_hessian_seconds"],
                 laplace_logevidence_gn=result["laplace_logevidence_gn"],
+                laplace_logevidence_original=result["laplace_logevidence_original"],
                 laplace_logevidence_fd=result["laplace_logevidence_fd"],
                 laplace_logevidence_ad=result["laplace_logevidence_ad"],
                 laplace_gn_minus_ad=(
                     result["laplace_logevidence_gn"]
                     - result["laplace_logevidence_ad"]
+                ),
+                laplace_original_minus_ad=(
+                    result["laplace_logevidence_original"]
+                    - result["laplace_logevidence_ad"]
+                ),
+                laplace_original_minus_fd=(
+                    result["laplace_logevidence_original"]
+                    - result["laplace_logevidence_fd"]
                 ),
                 laplace_fd_minus_ad=(
                     result["laplace_logevidence_fd"]
@@ -410,6 +455,7 @@ def run_experiment(
 
             key = f"{model}_{run_seed}"
             matrices[f"{key}_H_gn"] = H_gn
+            matrices[f"{key}_H_original_cbm"] = result["H_original"]
             matrices[f"{key}_H_ad"] = H_ad
             matrices[f"{key}_theta_map"] = fit.theta
             matrices[f"{key}_theta_probe"] = result["theta_probe"]
@@ -421,7 +467,8 @@ def run_experiment(
                 f"    GN obj={fit.objective:.8g}; "
                 f"AD-polish obj={fit_ad.objective:.8g}; "
                 f"GN/AD Hess err={result['gn_ad_error']:.3g}; "
-                f"Laplace GN-AD={row.laplace_gn_minus_ad:+.4g}"
+                f"Orig/AD Hess err={result['original_ad_error']:.3g}; "
+                f"Laplace Orig-AD={row.laplace_original_minus_ad:+.4g}"
             )
 
     csv_path = output_dir / "map_curvature_results.csv"

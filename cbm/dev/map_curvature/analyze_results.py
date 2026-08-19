@@ -85,8 +85,41 @@ def main():
                 f"(range {lo:.3e} - {hi:.3e})"
             )
 
-        # 5. Curvature properties
-        print("\n[5] Curvature at the same MAP")
+        # 5. Original CBM evidence Hessian vs new central FD / AD
+        print("\n[5] Original CBM evidence Hessian vs new observed Hessian")
+        med, lo, hi = _median_range(d.original_ad_rel_fro_error)
+        print(
+            f"Original-CBM FD vs AD error: median={med:.3e} "
+            f"(range {lo:.3e} - {hi:.3e})"
+        )
+        med2, lo2, hi2 = _median_range(d.original_fd_rel_fro_error)
+        print(
+            f"Original-CBM FD vs new central-FD error: median={med2:.3e} "
+            f"(range {lo2:.3e} - {hi2:.3e})"
+        )
+
+        pd_rate = 100.0 * np.mean(d.original_is_pd.astype(bool))
+        print(f"Original-CBM Hessian positive-definite rate: {pd_rate:.1f}%")
+
+        orig_delta = d.laplace_original_minus_ad
+        med3, lo3, hi3 = _median_range(orig_delta)
+        print(
+            f"logE_original - logE_AD: median={med3:+.6f} "
+            f"(range {lo3:+.6f} - {hi3:+.6f})"
+        )
+        print(
+            "median |original - AD logE|: "
+            f"{np.nanmedian(np.abs(orig_delta)):.6f}"
+        )
+
+        orig_fd_delta = d.laplace_original_minus_fd
+        print(
+            "median |original - new central-FD logE|: "
+            f"{np.nanmedian(np.abs(orig_fd_delta)):.6f}"
+        )
+
+        # 6. Curvature properties
+        print("\n[6] Curvature at the same MAP")
         print(
             f"minimum eigenvalue, GN median: {d.gn_min_eig.median():.6g}"
         )
@@ -105,7 +138,7 @@ def main():
         )
 
         # 6. Curvature-only Laplace consequence
-        print("\n[6] Curvature-only Laplace consequence at the SAME MAP")
+        print("\n[7] Curvature-only Laplace consequence at the SAME MAP")
         delta = d.laplace_gn_minus_ad
         med, lo, hi = _median_range(delta)
         print(
@@ -123,7 +156,7 @@ def main():
         )
 
         # 7. Optimization comparison
-        print("\n[7] GN vs AD Newton polish")
+        print("\n[8] GN vs AD Newton polish")
         obj_diff = d.gn_minus_ad_polish_objective
         med, lo, hi = _median_range(obj_diff)
         print(
@@ -147,7 +180,7 @@ def main():
         )
 
         # 8. Data-driven decision hints, deliberately conservative.
-        print("\n[8] What this model says about the toolbox")
+        print("\n[9] What this model says about the toolbox")
         curvature_err = np.nanmedian(d.gn_ad_rel_fro_error)
         map_diff = np.nanmedian(np.abs(obj_diff))
         fd_ad = np.nanmedian(d.fd_h0001_rel_error)
@@ -164,6 +197,29 @@ def main():
             print("- Observed Hessian: FD is close to AD, but not numerically identical.")
         else:
             print("- Observed Hessian: FD accuracy is questionable for this model.")
+
+        orig_ad = np.nanmedian(d.original_ad_rel_fro_error)
+        orig_loge = np.nanmedian(np.abs(d.laplace_original_minus_ad))
+        orig_pd_rate = np.mean(d.original_is_pd.astype(bool))
+
+        if orig_ad < 1e-4:
+            print("- Original CBM Hessian: numerically equivalent to AD for this model.")
+        else:
+            print(
+                "- Original CBM Hessian: differs measurably from the validated "
+                "observed Hessian."
+            )
+
+        if orig_pd_rate < 1.0:
+            print(
+                f"- Original CBM PD check: failed in {(1.0-orig_pd_rate)*100:.1f}% "
+                "of simulated datasets at this common MAP."
+            )
+
+        print(
+            f"- Original-vs-AD curvature-only evidence discrepancy: "
+            f"median |ΔlogE|={orig_loge:.4f}."
+        )
 
         if curvature_err >= 0.05:
             print(
@@ -190,12 +246,21 @@ def main():
     map_abs = np.nanmedian(np.abs(df.gn_minus_ad_polish_objective))
     fd_ad = np.nanmedian(df.fd_h0001_rel_error)
     gn_ad = np.nanmedian(df.gn_ad_rel_fro_error)
+    original_ad = np.nanmedian(df.original_ad_rel_fro_error)
     lap_abs = np.nanmedian(np.abs(df.laplace_gn_minus_ad))
+    original_lap_abs = np.nanmedian(np.abs(df.laplace_original_minus_ad))
+    original_pd_rate = np.mean(df.original_is_pd.astype(bool))
 
     print(f"median |GN-AD MAP objective difference|: {map_abs:.3e}")
     print(f"median FD(h=1e-4) vs AD Hessian error: {fd_ad:.3e}")
     print(f"median GN vs AD Hessian error: {gn_ad:.3f}")
+    print(f"median original-CBM FD vs AD Hessian error: {original_ad:.3e}")
+    print(f"original-CBM Hessian PD rate: {100*original_pd_rate:.1f}%")
     print(f"median |GN-AD curvature-only logE difference|: {lap_abs:.4f}")
+    print(
+        "median |original-CBM - AD curvature-only logE difference|: "
+        f"{original_lap_abs:.4f}"
+    )
 
     print("\nSuggested interpretation:")
     if map_abs < 1e-8:
@@ -227,8 +292,14 @@ def main():
         )
 
     print(
-        "4. Use the reported curvature-only log-evidence differences to decide "
-        "whether this separation matters enough downstream to change CBM evidence."
+        "4. Compare original-CBM nested forward FD directly with the validated "
+        "central-FD/AD curvature. This isolates whether the evidence-Hessian "
+        "estimator itself changes log evidence on identical data and MAPs."
+    )
+    print(
+        "5. Use the reported curvature-only log-evidence differences to decide "
+        "whether the production CBM evidence calculation should switch to the "
+        "validated central-FD observed Hessian."
     )
 
     print("=" * 74)
