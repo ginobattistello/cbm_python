@@ -15,7 +15,9 @@ M2
     alpha is fixed at 0.5 by setting its prior variance to zero;
     beta remains estimated.
 
-All BMS functions use their integrated CBM-style ``verbose=True`` output.
+Each BMS function uses:
+- ``verbose=True`` for CBM-style console output;
+- ``display=True`` for the integrated diagnostic figure.
 """
 
 import numpy as np
@@ -49,6 +51,7 @@ config = Config(
     num_init=5,
     verbose=False,
     display=False,
+    hessian_method="central_fd",
 )
 
 
@@ -66,6 +69,7 @@ data = [
     for _ in range(20)
 ]
 
+# Model 1: alpha and beta free.
 fit_free = individual_fit(
     data=data,
     model=binary_model,
@@ -74,6 +78,7 @@ fit_free = individual_fit(
     config=config,
 )
 
+# Model 2: alpha fixed at 0.5.
 fit_fixed = individual_fit(
     data=data,
     model=binary_model,
@@ -82,6 +87,7 @@ fit_fixed = individual_fit(
     config=config,
 )
 
+# subjects x models
 L = np.column_stack([
     fit_free.output.log_evidence,
     fit_fixed.output.log_evidence,
@@ -91,6 +97,7 @@ result = bms_group(
     L,
     n_samples=100_000,
     verbose=True,
+    display=True,
 )
 
 
@@ -98,7 +105,7 @@ result = bms_group(
 # 2. Between-condition BMS
 # =====================================================================
 #
-# Same subjects, two repeated conditions.
+# Same subjects measured in two conditions.
 #
 # Condition 1: alpha = 0.50
 # Condition 2: alpha = 0.20
@@ -109,6 +116,11 @@ result = bms_group(
 
 rng = np.random.default_rng(20)
 n_subjects = 16
+
+
+# ---------------------------------------------------------------------
+# Condition 1
+# ---------------------------------------------------------------------
 
 data_condition_1 = [
     binary_subject(
@@ -140,6 +152,10 @@ L_condition_1 = np.column_stack([
 ])
 
 
+# ---------------------------------------------------------------------
+# Condition 2
+# ---------------------------------------------------------------------
+
 data_condition_2 = [
     binary_subject(
         rng,
@@ -169,6 +185,8 @@ L_condition_2 = np.column_stack([
     fit_fixed_condition_2.output.log_evidence,
 ])
 
+
+# subjects x models x conditions
 L_conditions = np.stack(
     [
         L_condition_1,
@@ -181,6 +199,7 @@ result_conditions = bms_group_btw_conds(
     L_conditions,
     n_samples=100_000,
     verbose=True,
+    display=True,
 )
 
 
@@ -199,6 +218,11 @@ result_conditions = bms_group_btw_conds(
 #
 
 rng = np.random.default_rng(30)
+
+
+# ---------------------------------------------------------------------
+# Group 1
+# ---------------------------------------------------------------------
 
 data_group_1 = [
     binary_subject(
@@ -229,6 +253,10 @@ L_group_1 = np.column_stack([
     fit_fixed_group_1.output.log_evidence,
 ])
 
+
+# ---------------------------------------------------------------------
+# Group 2
+# ---------------------------------------------------------------------
 
 data_group_2 = [
     binary_subject(
@@ -266,4 +294,5 @@ result_groups = bms_group_btw_groups(
     ],
     n_samples=100_000,
     verbose=True,
+    display=True,
 )

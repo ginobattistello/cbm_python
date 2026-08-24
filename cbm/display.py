@@ -620,70 +620,94 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             _panel(axB, "B", "parameter path")
 
         # ---- C: objective evolution ------------------------------------
-        # Both traces show the same quantity: the log joint. The observed
-        # Hessian is computed only after optimization, so evidence is not
-        # defined at intermediate GN polish steps.
+        # Public diagnostic: show only optimization progress that matters.
+        #
+        # ``search_f`` contains all L-BFGS-B objective evaluations, including
+        # line-search probes that may be rejected. For a clean subject-level
+        # diagnostic, display the best-so-far log joint instead of every raw
+        # probe. GN polish values are then appended on the same x-axis.
+        #
+        # Both phases show the same quantity: the log joint.
         sf = getattr(diag, "search_f", None) if diag is not None else None
         pf = getattr(diag, "polish_f", None) if diag is not None else None
 
         drew = False
+        last_x = -1
 
         if sf is not None and len(sf):
             sf = np.asarray(sf, dtype=float)
-            x_search = np.arange(sf.size)
-            axC.plot(
-                x_search,
-                np.maximum.accumulate(sf),
-                lw=1.1,
-                color=_INK_DARK,
-                label="L-BFGS-B log-joint (best so far)",
-            )
-            axC.plot(
-                x_search,
-                sf,
-                lw=0.5,
-                color=_INK,
-                alpha=0.30,
-                label="L-BFGS-B evaluations",
-            )
-            axC.set_xlabel("function evaluations")
-            axC.set_ylabel("log-joint")
-            drew = True
+            sf = sf[np.isfinite(sf)]
+
+            if sf.size:
+                # L-BFGS-B maximizes the log joint indirectly by minimizing
+                # its negative. ``search_f`` stores the log-joint values
+                # evaluated during that process. The cumulative maximum is
+                # the accepted/best-so-far optimization trajectory.
+                lbfgs_logjoint = np.maximum.accumulate(sf)
+                x_lbfgs = np.arange(lbfgs_logjoint.size)
+
+                axC.plot(
+                    x_lbfgs,
+                    lbfgs_logjoint,
+                    lw=1.25,
+                    color=_INK_DARK,
+                    linestyle="-",
+                    label="L-BFGS-B",
+                )
+
+                last_x = int(x_lbfgs[-1])
+                drew = True
 
         if pf is not None and len(pf):
             pf = np.asarray(pf, dtype=float)
-            finite_pf = pf[np.isfinite(pf)]
+            pf = pf[np.isfinite(pf)]
 
-            if finite_pf.size:
-                # GN usually contains only a few accepted steps, so an inset
-                # preserves their scale without pretending that polish steps
-                # are L-BFGS-B function evaluations.
-                ins = (
-                    axC.inset_axes([0.60, 0.43, 0.35, 0.36])
-                    if drew
-                    else axC
+            if pf.size:
+                # Put GN directly after the L-BFGS-B trajectory. If there was
+                # no stored L-BFGS-B trace, GN simply starts at step 0.
+                start_x = last_x + 1
+                x_gn = np.arange(
+                    start_x,
+                    start_x + pf.size,
                 )
-                ins.plot(
-                    np.arange(pf.size),
+
+                axC.plot(
+                    x_gn,
                     pf,
-                    lw=1.2,
+                    lw=1.25,
+                    color=_INK,
+                    linestyle="--",
                     marker="o",
-                    ms=3.0,
-                    color=_INK_DARK,
+                    markersize=3.0,
+                    label="GN polish",
                 )
-                ins.set_title("GN polish · log-joint", fontsize=6.2, pad=2)
-                ins.set_xlabel("polish step", fontsize=5.8, labelpad=1)
-                ins.tick_params(labelsize=5.5, length=1.8, pad=1)
-                ins.xaxis.get_major_locator().set_params(integer=True)
-                for spine in ins.spines.values():
-                    spine.set_linewidth(0.5)
+
+                # Visually mark the transition between optimization phases.
+                if last_x >= 0:
+                    axC.axvline(
+                        last_x + 0.5,
+                        color=_GREY,
+                        lw=0.7,
+                        linestyle=":",
+                        alpha=0.8,
+                    )
+
                 drew = True
 
         if drew:
+            axC.set_xlabel("optimization step")
+            axC.set_ylabel("log-joint")
             axC.grid(alpha=0.6)
-            if sf is not None and len(sf):
-                axC.legend(loc="lower right", fontsize=6.2)
-            _panel(axC, "C", "log-joint during optimization")
+            axC.legend(
+                loc="lower right",
+                fontsize=6.4,
+            )
+            axC.xaxis.get_major_locator().set_params(integer=True)
+            _panel(
+                axC,
+                "C",
+                "log-joint during optimization",
+            )
         else:
             axC.text(
                 0.5,
@@ -695,7 +719,11 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                 fontsize=7.5,
                 color=_GREY,
             )
-            _panel(axC, "C", "log-joint during optimization")
+            _panel(
+                axC,
+                "C",
+                "log-joint during optimization",
+            )
 
         # ---- D: parameter estimates with CI ----------------------------
         yy = np.arange(d)
@@ -743,7 +771,7 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
         if nit is not None:
             cost.append(f"initializations: {nit}")
         if sf is not None:
-            cost.append(f"evaluations: {len(sf)}")
+            cost.append(f"L-BFGS-B evals: {len(sf)}")
         n_polish = (
             getattr(diag, "n_polish_steps", None)
             if diag is not None

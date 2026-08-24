@@ -166,6 +166,15 @@ class GroupBMSResult(_DictShim):
         from .reporting import bms_table
         return bms_table(self, model_names=model_names, pandas=pandas)
 
+    def plot(self, model_names=None, display=True, **kwargs):
+        """Plot posterior attribution and model-level BMS quantities."""
+        return _plot_bms(
+            self,
+            model_names=model_names,
+            display=display,
+            **kwargs,
+        )
+
     def __repr__(self) -> str:
         try:
             return self.summary()
@@ -212,6 +221,15 @@ class BtwCondsResult(_DictShim):
     def summary(self) -> str:
         from .reporting import btw_conds_summary
         return btw_conds_summary(self)
+
+    def plot(self, model_names=None, display=True, **kwargs):
+        """Plot condition-specific attribution and BMS comparison."""
+        return _plot_btw_conds(
+            self,
+            model_names=model_names,
+            display=display,
+            **kwargs,
+        )
 
     def __repr__(self) -> str:
         try:
@@ -261,6 +279,15 @@ class BtwGroupsResult(_DictShim):
     def summary(self) -> str:
         from .reporting import btw_groups_summary
         return btw_groups_summary(self)
+
+    def plot(self, model_names=None, display=True, **kwargs):
+        """Plot group-specific attribution and BMS comparison."""
+        return _plot_btw_groups(
+            self,
+            model_names=model_names,
+            display=display,
+            **kwargs,
+        )
 
     def __repr__(self) -> str:
         try:
@@ -391,7 +418,8 @@ def bms_group(L: np.ndarray,
               families: Optional[Sequence[Sequence[int]]] = None,
               family_names: Optional[Sequence[str]] = None,
               n_samples: int = 1_000_000,
-              verbose: bool = True) -> GroupBMSResult:
+              verbose: bool = True,
+              display: bool = False) -> GroupBMSResult:
     """
     Standard group-level BMS (≈ VBA_groupBMC).
 
@@ -402,6 +430,7 @@ def bms_group(L: np.ndarray,
         family_names: optional names, one per family.
         n_samples: Monte-Carlo samples for exceedance probabilities.
         verbose: If True, print a compact CBM-style run/result summary.
+        display: If True, automatically show the BMS diagnostic figure.
 
     Returns:
         GroupBMSResult (with .families set when families were given).
@@ -440,6 +469,9 @@ def bms_group(L: np.ndarray,
 
         if verbose:
             _print_bms_result(result)
+
+        if display:
+            result.plot()
 
         return result
 
@@ -515,6 +547,9 @@ def bms_group(L: np.ndarray,
 
     if verbose:
         _print_bms_result(result)
+
+    if display:
+        result.plot()
 
     return result
 
@@ -604,7 +639,8 @@ def bms_group_btw_conds(L: np.ndarray,
                         families: Optional[Sequence[Sequence[int]]] = None,
                         family_names: Optional[Sequence[str]] = None,
                         n_samples: int = 1_000_000,
-                        verbose: bool = True) -> BtwCondsResult:
+                        verbose: bool = True,
+                        display: bool = False) -> BtwCondsResult:
     """
     Between-conditions BMS (≈ VBA_groupBMC_btwConds): do the SAME
     subjects use the same model (or family) across conditions?
@@ -642,6 +678,7 @@ def bms_group_btw_conds(L: np.ndarray,
         family_names=["equal", "not_equal"],
         n_samples=n_samples,
         verbose=False,
+        display=False,
     )
     per_cond = [
         bms_group(
@@ -650,6 +687,7 @@ def bms_group_btw_conds(L: np.ndarray,
             family_names=family_names,
             n_samples=n_samples,
             verbose=False,
+            display=False,
         )
         for c in range(n_cond)
     ]
@@ -670,6 +708,9 @@ def bms_group_btw_conds(L: np.ndarray,
     if verbose:
         _print_btw_conds_result(result)
 
+    if display:
+        result.plot()
+
     return result
 
 
@@ -677,7 +718,8 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
                          families: Optional[Sequence[Sequence[int]]] = None,
                          family_names: Optional[Sequence[str]] = None,
                          n_samples: int = 1_000_000,
-                         verbose: bool = True) -> BtwGroupsResult:
+                         verbose: bool = True,
+                         display: bool = False) -> BtwGroupsResult:
     """
     Between-groups BMS (= VBA_groupBMC_btwGroups): do DIFFERENT groups
     of subjects have the same model frequencies?
@@ -715,6 +757,7 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
         family_names=family_names,
         n_samples=n_samples,
         verbose=False,
+        display=False,
     )
 
     # H1: each group gets its own frequency vector (separate fits)
@@ -725,6 +768,7 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
             family_names=family_names,
             n_samples=n_samples,
             verbose=False,
+            display=False,
         )
         for Lg in Ls
     ]
@@ -747,8 +791,649 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
     if verbose:
         _print_btw_groups_result(result)
 
+    if display:
+        result.plot()
+
     return result
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Plotting
+# ═══════════════════════════════════════════════════════════════════
+#
+# Kept in this module intentionally so the toolbox has one compact BMS file.
+# Plotting consumes the already-computed result objects and never changes the
+# statistical inference.
+#
+def _mpl():
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def _model_names(n_models: int, model_names=None):
+    if model_names is None:
+        return [f"M{k + 1}" for k in range(n_models)]
+
+    names = list(model_names)
+    if len(names) != n_models:
+        raise ValueError(
+            f"model_names has {len(names)} entries for {n_models} models"
+        )
+    return names
+
+
+# Same grayscale palette and typography as cbm/display.py.
+_INK_LIGHT, _INK, _INK_DARK = "#C9C9CE", "#7A7A80", "#3A3A3E"
+_GREY = "#888888"
+
+
+def _plot_style():
+    """Matplotlib rcParams shared with the individual-fit display."""
+    return {
+        "figure.dpi": 110,
+        "savefig.dpi": 200,
+        "font.size": 8,
+        "font.family": "sans-serif",
+        "font.sans-serif": [
+            "Helvetica Neue",
+            "Helvetica",
+            "Arial",
+            "DejaVu Sans",
+        ],
+        "axes.titlesize": 8.5,
+        "axes.labelsize": 8,
+        "axes.linewidth": 0.6,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.axisbelow": True,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "xtick.major.width": 0.6,
+        "ytick.major.width": 0.6,
+        "legend.fontsize": 7,
+        "legend.frameon": False,
+        "grid.linewidth": 0.4,
+        "grid.color": "#DDDDDD",
+    }
+
+
+def _style_axes(ax):
+    ax.tick_params(labelsize=7, length=2.5)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.6)
+
+
+def _panel(
+    ax,
+    letter,
+    title=None,
+    subtitle=None,
+    dx=-0.13,
+    dy=1.03,
+):
+    """Panel label/title/subtitle matching cbm/display.py."""
+    ax.text(
+        dx,
+        dy,
+        letter,
+        transform=ax.transAxes,
+        fontsize=9.5,
+        fontweight="bold",
+        va="bottom",
+        ha="left",
+    )
+
+    if title:
+        ax.set_title(
+            title,
+            pad=14 if subtitle else 5,
+        )
+
+    if subtitle:
+        ax.text(
+            0.5,
+            1.015,
+            subtitle,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=6.4,
+            color=_GREY,
+        )
+
+
+def _responsibility_matrix(
+
+    ax,
+    g,
+    model_names,
+    *,
+    title="subject model attribution",
+    column_labels=None,
+    separators=None,
+):
+    """Show q(model | subject) as models x subjects grayscale matrix."""
+    g = np.asarray(g, dtype=float)
+
+    if g.ndim != 2:
+        raise ValueError("responsibility matrix g must be subjects x models")
+
+    matrix = g.T
+
+    image = ax.imshow(
+        matrix,
+        vmin=0.0,
+        vmax=1.0,
+        aspect="auto",
+        cmap="Greys",
+        interpolation="nearest",
+    )
+
+    ax.set_yticks(np.arange(len(model_names)))
+    ax.set_yticklabels(model_names)
+    ax.set_ylabel("model")
+    ax.set_xlabel("subject")
+
+    n_subjects = g.shape[0]
+    if n_subjects <= 20:
+        ax.set_xticks(np.arange(n_subjects))
+        if column_labels is None:
+            labels = [str(i + 1) for i in range(n_subjects)]
+        else:
+            labels = list(column_labels)
+        ax.set_xticklabels(labels, rotation=0)
+    else:
+        # Keep the matrix readable for larger samples.
+        step = max(1, int(np.ceil(n_subjects / 10)))
+        ticks = np.arange(0, n_subjects, step)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(i + 1) for i in ticks])
+
+    if separators is not None:
+        for x in separators:
+            ax.axvline(
+                x - 0.5,
+                color=_INK,
+                lw=0.8,
+                linestyle=":",
+            )
+
+    # Outline the most probable model for each subject.
+    winner = np.argmax(g, axis=1)
+    for n, k in enumerate(winner):
+        ax.add_patch(
+            __import__("matplotlib").patches.Rectangle(
+                (n - 0.5, k - 0.5),
+                1.0,
+                1.0,
+                fill=False,
+                edgecolor=_INK_DARK,
+                linewidth=0.6,
+            )
+        )
+
+    _style_axes(ax)
+    _panel(
+        ax,
+        "A",
+        title,
+        subtitle="grayscale = posterior responsibility q(model | subject)",
+    )
+
+    return image
+
+
+def _paired_bars(
+    ax,
+    frequencies,
+    exceedance,
+    model_names,
+    *,
+    title="group model probabilities",
+    protected=None,
+):
+    """Paired bars for expected model frequency and exceedance probability."""
+    frequencies = np.asarray(frequencies, dtype=float)
+    exceedance = np.asarray(exceedance, dtype=float)
+
+    x = np.arange(len(model_names))
+    width = 0.34
+
+    ax.bar(
+        x - width / 2,
+        frequencies,
+        width,
+        label="frequency",
+        color=_INK_DARK,
+    )
+    ax.bar(
+        x + width / 2,
+        exceedance,
+        width,
+        label="exceedance probability",
+        color=_INK_LIGHT,
+    )
+
+    if protected is not None:
+        protected = np.asarray(protected, dtype=float)
+        ax.plot(
+            x,
+            protected,
+            marker="o",
+            linestyle="none",
+            markersize=4,
+            color=_INK_DARK,
+            label="protected XP",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(model_names)
+    ax.set_ylim(0.0, 1.03)
+    ax.set_ylabel("probability")
+    ax.legend(fontsize=6.5, frameon=False)
+    ax.grid(axis="y", alpha=0.25)
+    _style_axes(ax)
+    _panel(ax, "B", title)
+
+
+def _multi_bars(
+    ax,
+    results,
+    model_names,
+    labels,
+    *,
+    title,
+):
+    """Condition/group-specific frequency and exceedance bars."""
+    n_sets = len(results)
+    n_models = len(model_names)
+
+    x = np.arange(n_models)
+    total_width = 0.82
+    width = total_width / max(1, 2 * n_sets)
+
+    offsets = (
+        np.arange(2 * n_sets) - (2 * n_sets - 1) / 2
+    ) * width
+
+    for j, (label, result) in enumerate(zip(labels, results)):
+        ax.bar(
+            x + offsets[2 * j],
+            result.model_frequency,
+            width,
+            label=f"{label} frequency",
+            alpha=0.95,
+        )
+        ax.bar(
+            x + offsets[2 * j + 1],
+            result.exceedance_prob,
+            width,
+            label=f"{label} XP",
+            alpha=0.45,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(model_names)
+    ax.set_ylim(0.0, 1.03)
+    ax.set_ylabel("probability")
+    ax.legend(
+        fontsize=5.8,
+        frameon=False,
+        ncol=2,
+    )
+    ax.grid(axis="y", alpha=0.25)
+    _style_axes(ax)
+    _panel(ax, "C", title)
+
+
+def _summary_standard(result, model_names):
+    best_f = int(np.argmax(result.model_frequency))
+    best_xp = int(np.argmax(result.exceedance_prob))
+
+    lines = [
+        "Standard BMS",
+        "",
+        f"subjects: {result.g.shape[0] if result.g is not None else '?'}",
+        f"models: {len(model_names)}",
+        f"highest frequency: {model_names[best_f]} "
+        f"({result.model_frequency[best_f]:.3f})",
+        f"highest XP: {model_names[best_xp]} "
+        f"({result.exceedance_prob[best_xp]:.3f})",
+        f"BOR: {result.bor:.3f}",
+    ]
+
+    if result.families is not None:
+        fam = result.families
+        best_family = int(np.argmax(fam.family_frequency))
+        lines += [
+            "",
+            "Family inference",
+            f"best family: {fam.names[best_family]} "
+            f"({fam.family_frequency[best_family]:.3f})",
+            f"family BOR: {fam.bor:.3f}",
+        ]
+
+    return lines
+
+
+def _summary_conds(result):
+    tuple_models = " -> ".join(
+        f"M{int(m) + 1}"
+        for m in result.best.models
+    )
+
+    return [
+        "Between conditions",
+        "",
+        f"conditions: {len(result.per_cond)}",
+        f"P(same model/family): {result.xp:.3f}",
+        f"protected P(same): {result.pxp:.3f}",
+        f"BOR: {result.bor:.3f}",
+        f"best tuple: {tuple_models}",
+        "best tuple status: "
+        + ("same" if result.best.is_equal else "different"),
+    ]
+
+
+def _summary_groups(result):
+    return [
+        "Between groups",
+        "",
+        f"groups: {result.n_groups}",
+        "group sizes: "
+        + ", ".join(str(n) for n in result.group_sizes),
+        f"P(equal frequency profile): {result.p_equal:.3f}",
+        f"reject equality (p<.05): {result.h_reject_equality}",
+        f"pooled free energy: {result.F_equal:.3f}",
+        f"separate free energy: {result.F_diff:.3f}",
+    ]
+
+
+def _summary_panel(ax, lines, letter="D"):
+    ax.axis("off")
+    _panel(ax, letter, "result summary")
+
+    y = 0.88
+    for i, line in enumerate(lines):
+        if line == "":
+            y -= 0.055
+            continue
+
+        ax.text(
+            0.04,
+            y,
+            line,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.2,
+            fontweight="bold" if i == 0 else "normal",
+        )
+        y -= 0.085
+
+
+def _plot_bms(
+    result,
+    model_names=None,
+    figsize=(9.0, 6.8),
+    display=True,
+):
+    """Plot standard group BMS."""
+    plt = _mpl()
+
+    n_models = len(result.model_frequency)
+    names = _model_names(n_models, model_names)
+
+    with plt.rc_context(_plot_style()):
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[1.55, 1.0],
+            height_ratios=[1.0, 0.82],
+            hspace=0.58,
+            wspace=0.30,
+            top=0.90,
+            bottom=0.08,
+            left=0.09,
+            right=0.97,
+        )
+
+        axA = fig.add_subplot(gs[0, 0])
+        axB = fig.add_subplot(gs[0, 1])
+        axC = fig.add_subplot(gs[1, 0])
+        axD = fig.add_subplot(gs[1, 1])
+
+        if result.g is None:
+            axA.axis("off")
+            _panel(
+                axA,
+                "A",
+                "subject model attribution",
+                subtitle="posterior responsibilities unavailable",
+            )
+        else:
+            _responsibility_matrix(
+                axA,
+                result.g,
+                names,
+            )
+
+        _paired_bars(
+            axB,
+            result.model_frequency,
+            result.exceedance_prob,
+            names,
+            title="model frequency and exceedance",
+            protected=result.protected_exceedance_prob,
+        )
+
+        x = np.arange(n_models)
+        axC.bar(
+            x,
+            result.posterior_parameters,
+            color=_INK,
+        )
+        axC.set_xticks(x)
+        axC.set_xticklabels(names)
+        axC.set_ylabel("posterior Dirichlet α")
+        axC.grid(axis="y", alpha=0.25)
+        _style_axes(axC)
+        _panel(
+            axC,
+            "C",
+            "posterior model mass",
+        )
+
+        _summary_panel(
+            axD,
+            _summary_standard(result, names),
+        )
+
+        if display:
+            plt.show()
+
+        return fig
+
+def _plot_btw_conds(
+    result,
+    model_names=None,
+    figsize=(9.0, 6.2),
+    display=True,
+):
+    """Plot between-condition BMS.
+
+    Only the subject/model attribution matrix, the higher-level same-vs-
+    different comparison, and a compact text summary are shown.
+    """
+    plt = _mpl()
+
+    n_models = len(result.per_cond[0].model_frequency)
+    names = _model_names(n_models, model_names)
+
+    with plt.rc_context(_plot_style()):
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[1.55, 1.0],
+            height_ratios=[1.0, 0.72],
+            hspace=0.62,
+            wspace=0.30,
+            top=0.89,
+            bottom=0.08,
+            left=0.09,
+            right=0.97,
+        )
+
+        axA = fig.add_subplot(gs[0, :])
+        axB = fig.add_subplot(gs[1, 0])
+        axC = fig.add_subplot(gs[1, 1])
+
+        gs_cond = [r.g for r in result.per_cond]
+
+        if all(g is not None for g in gs_cond):
+            matrix = np.vstack(gs_cond)
+            n_subjects = gs_cond[0].shape[0]
+            separators = [
+                n_subjects * c
+                for c in range(1, len(gs_cond))
+            ]
+            _responsibility_matrix(
+                axA,
+                matrix,
+                names,
+                title="model attribution across conditions",
+                separators=separators,
+            )
+        else:
+            axA.axis("off")
+            _panel(
+                axA,
+                "A",
+                "model attribution across conditions",
+                subtitle="posterior responsibilities unavailable",
+            )
+
+        axB.bar(
+            ["same", "different"],
+            [result.xp, 1.0 - result.xp],
+            color=[_INK_DARK, _INK_LIGHT],
+        )
+        axB.set_ylim(0.0, 1.03)
+        axB.set_ylabel("exceedance probability")
+        axB.grid(axis="y", alpha=0.25)
+        _style_axes(axB)
+        _panel(
+            axB,
+            "B",
+            "same vs different across conditions",
+            subtitle=(
+                f"protected P(same) = {result.pxp:.3f} · "
+                f"BOR = {result.bor:.3f}"
+            ),
+        )
+
+        _summary_panel(
+            axC,
+            _summary_conds(result),
+            letter="C",
+        )
+
+        if display:
+            plt.show()
+
+        return fig
+
+def _plot_btw_groups(
+    result,
+    model_names=None,
+    figsize=(9.0, 6.2),
+    display=True,
+):
+    """Plot between-group BMS.
+
+    Only the subject/model attribution matrix, the higher-level equality
+    comparison, and a compact text summary are shown.
+    """
+    plt = _mpl()
+
+    n_models = len(result.pooled.model_frequency)
+    names = _model_names(n_models, model_names)
+
+    with plt.rc_context(_plot_style()):
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[1.55, 1.0],
+            height_ratios=[1.0, 0.72],
+            hspace=0.62,
+            wspace=0.30,
+            top=0.89,
+            bottom=0.08,
+            left=0.09,
+            right=0.97,
+        )
+
+        axA = fig.add_subplot(gs[0, :])
+        axB = fig.add_subplot(gs[1, 0])
+        axC = fig.add_subplot(gs[1, 1])
+
+        gs_group = [r.g for r in result.per_group]
+
+        if all(g is not None for g in gs_group):
+            matrix = np.vstack(gs_group)
+            cumulative = np.cumsum(
+                [g.shape[0] for g in gs_group]
+            )[:-1]
+            _responsibility_matrix(
+                axA,
+                matrix,
+                names,
+                title="model attribution across groups",
+                separators=cumulative,
+            )
+        else:
+            axA.axis("off")
+            _panel(
+                axA,
+                "A",
+                "model attribution across groups",
+                subtitle="posterior responsibilities unavailable",
+            )
+
+        axB.bar(
+            ["equal", "different"],
+            [result.p_equal, 1.0 - result.p_equal],
+            color=[_INK_DARK, _INK_LIGHT],
+        )
+        axB.set_ylim(0.0, 1.03)
+        axB.set_ylabel("posterior probability")
+        axB.grid(axis="y", alpha=0.25)
+        _style_axes(axB)
+        _panel(
+            axB,
+            "B",
+            "equal vs different group profiles",
+            subtitle=(
+                "equality rejected"
+                if result.h_reject_equality
+                else "equality not rejected"
+            ),
+        )
+
+        _summary_panel(
+            axC,
+            _summary_groups(result),
+            letter="C",
+        )
+
+        if display:
+            plt.show()
+
+        return fig
 
 # ═══════════════════════════════════════════════════════════════════
 # Evidence provenance (DEV.md §5 promotion note)
