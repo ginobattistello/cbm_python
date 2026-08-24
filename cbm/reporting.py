@@ -21,7 +21,7 @@ COVERAGE
 --------
     FitResult       individual_fit    summary() · table() · se
     HBIResult       hbi_main          summary() · table() · subject_table()
-    GroupBMSResult  group_bms         summary() · table()
+    GroupBMSResult  bms_group         summary() · table()
     BtwCondsResult / BtwGroupsResult  summary()
 
 All of it is **purely additive** — no existing field changes, and nothing
@@ -567,7 +567,7 @@ def hbi_summary(result, max_models: int = 12) -> str:
 
 
 # ===========================================================================
-# group_bms results
+# bms_group results
 # ===========================================================================
 
 def bms_rows(result, model_names: Optional[List[str]] = None

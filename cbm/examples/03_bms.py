@@ -1,52 +1,50 @@
-"""Simple random-effects Bayesian model selection."""
+"""Random-effects Bayesian model selection.
+
+M1 estimates alpha and beta.
+M2 fixes alpha=0.5 through a zero prior variance and estimates beta.
+"""
+
 import numpy as np
+
+from cbm.bms_group import bms_group
 from cbm.individual_fit import individual_fit
 from cbm.optimization import Config
-from cbm.group_bms import group_bms
 
-from models import binary_rw, binary_rw_trials
+from models import binary_model
 from simulate import binary_subject
 
-rng=np.random.default_rng(10)
-data=[binary_subject(rng, theta=(0.35,3.0)) for _ in range(20)]
 
-# Two candidate models with different parameter dimensions:
-# M1 fits alpha and beta.
-def m1(theta,data): return binary_rw(theta,data)
-def m1_trials(theta,data): return binary_rw_trials(theta,data)
+rng = np.random.default_rng(10)
+data = [binary_subject(rng, theta=(0.35, 3.0)) for _ in range(20)]
 
-# M2 fixes alpha=0.5 and fits only beta.
-def m2(theta,data): return binary_rw(np.array([0.5,theta[0]]),data)
-def m2_trials(theta,data): return binary_rw_trials(np.array([0.5,theta[0]]),data)
-
-fit1=individual_fit(
-    data,m1,model_trials=m1_trials,
-    prior_mean=np.array([0.5,2.0]),
-    prior_variance=np.array([1.0,16.0]),
-    config=Config(
-        d=2,
-        range_bounds=np.array([[0.02,0.1],[0.98,8.0]]),
-        hard_bounds=np.array([[0.001,0.01],[0.999,20.0]]),
-        num_init=5,verbose=False,
-    ),
+config = Config(
+    d=2,
+    range_bounds=np.array([[0.02, 0.10], [0.98, 8.00]]),
+    hard_bounds=np.array([[0.001, 0.01], [0.999, 20.0]]),
+    num_init=5,
+    verbose=False,
+    display=False,
 )
 
-fit2=individual_fit(
-    data,m2,model_trials=m2_trials,
-    prior_mean=np.array([2.0]),
-    prior_variance=np.array([16.0]),
-    config=Config(
-        d=1,
-        range_bounds=np.array([[0.1],[8.0]]),
-        hard_bounds=np.array([[0.01],[20.0]]),
-        num_init=5,verbose=False,
-    ),
+fit_free = individual_fit(
+    data=data,
+    model=binary_model,
+    prior_mean=np.array([0.5, 2.0]),
+    prior_variance=np.array([1.0, 16.0]),
+    config=config,
 )
 
-L=np.column_stack([fit1.output.log_evidence,fit2.output.log_evidence])
-result=group_bms(L,n_samples=100_000)
+fit_fixed = individual_fit(
+    data=data,
+    model=binary_model,
+    prior_mean=np.array([0.5, 2.0]),
+    prior_variance=np.array([0.0, 16.0]),
+    config=config,
+)
 
-print(result)
-print("model frequency:",result.model_frequency)
-print("exceedance probability:",result.exceedance_prob)
-print("protected exceedance probability:",result.protected_exceedance_prob)
+log_evidence = np.column_stack([
+    fit_free.output.log_evidence,
+    fit_fixed.output.log_evidence,
+])
+
+result = bms_group(log_evidence, n_samples=100_000, verbose=True)

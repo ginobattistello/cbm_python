@@ -4,9 +4,9 @@ Group-level Bayesian Model Selection between families, conditions and groups
 Reproduces the VBA toolbox's group-level BMC routines on top of the
 existing `bms()` / `model_selection.py` machinery:
 
-    group_bms            ≈ VBA_groupBMC          (2D L, optional families)
-    group_bms_btw_conds  ≈ VBA_groupBMC_btwConds (3D L: subj × model × cond)
-    group_bms_btw_groups ≈ VBA_groupBMC_btwGroups(list of 2D L, one per group)
+    bms_group            ≈ VBA_groupBMC          (2D L, optional families)
+    bms_group_btw_conds  ≈ VBA_groupBMC_btwConds (3D L: subj × model × cond)
+    bms_group_btw_groups ≈ VBA_groupBMC_btwGroups(list of 2D L, one per group)
 
 Promoted out of cbm/dev/ on 2026-08-03 (DEV.md §5) with these changes
 against the staged draft:
@@ -50,6 +50,7 @@ NeuroImage 84:971-85. doi: 10.1016/j.neuroimage.2013.08.065
 """
 
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from itertools import product as iterproduct
 from typing import List, Optional, Sequence
 import warnings
@@ -324,13 +325,73 @@ def _validate_partition(families: Sequence[Sequence[int]],
     return fams, names, C
 
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Console output
+# ═══════════════════════════════════════════════════════════════════
+
+def _print_bms_header(
+    n_subjects: int,
+    n_models: int,
+    families,
+    n_samples: int,
+) -> None:
+    """Print a compact CBM-style run header."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    print("=" * 70)
+    print(f"{'bms_group':<40}{now:>30}")
+    print("=" * 70)
+    print(f"Number of subjects: {n_subjects}")
+    print(f"Number of models: {n_models}")
+    print(
+        "Families: "
+        + ("none" if families is None else str(len(families)))
+    )
+    print(f"Exceedance samples: {int(n_samples):,}")
+    print("-" * 70)
+
+
+def _print_bms_result(result: "GroupBMSResult") -> None:
+    """Print the main BMS quantities after inference."""
+    print("Model results")
+
+    for k in range(len(result.model_frequency)):
+        print(
+            f"  Model {k + 1:02d}: "
+            f"frequency={result.model_frequency[k]:.3f}  "
+            f"XP={result.exceedance_prob[k]:.3f}  "
+            f"PXP={result.protected_exceedance_prob[k]:.3f}"
+        )
+
+    print(f"Bayes omnibus risk: {result.bor:.3f}")
+
+    if result.families is not None:
+        fam = result.families
+        print("\nFamily results")
+
+        for f, name in enumerate(fam.names):
+            print(
+                f"  {name}: "
+                f"frequency={fam.family_frequency[f]:.3f}  "
+                f"XP={fam.exceedance_prob[f]:.3f}  "
+                f"PXP={fam.protected_exceedance_prob[f]:.3f}"
+            )
+
+        print(f"Family Bayes omnibus risk: {fam.bor:.3f}")
+
+    print("-" * 70)
+    print("done :]")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Entry points (DEV.md §5: "no work in __init__")
 # ═══════════════════════════════════════════════════════════════════
-def group_bms(L: np.ndarray,
+def bms_group(L: np.ndarray,
               families: Optional[Sequence[Sequence[int]]] = None,
               family_names: Optional[Sequence[str]] = None,
-              n_samples: int = 1_000_000) -> GroupBMSResult:
+              n_samples: int = 1_000_000,
+              verbose: bool = True) -> GroupBMSResult:
     """
     Standard group-level BMS (≈ VBA_groupBMC).
 
@@ -340,6 +401,7 @@ def group_bms(L: np.ndarray,
             e.g. [[0, 1], [2, 3]]. Must be disjoint and exhaustive.
         family_names: optional names, one per family.
         n_samples: Monte-Carlo samples for exceedance probabilities.
+        verbose: If True, print a compact CBM-style run/result summary.
 
     Returns:
         GroupBMSResult (with .families set when families were given).
@@ -349,6 +411,14 @@ def group_bms(L: np.ndarray,
         raise ValueError(f"L must be 2D (subjects × models), got ndim={L.ndim}")
     n_sub, n_mod = L.shape
 
+    if verbose:
+        _print_bms_header(
+            n_subjects=n_sub,
+            n_models=n_mod,
+            families=families,
+            n_samples=n_samples,
+        )
+
     if families is None:
         # VBA_groupBMC normalizes the default prior to ONE total prior
         # count (`priors.a = priors.a./sum(priors.a)`), i.e. 1/K per
@@ -357,7 +427,7 @@ def group_bms(L: np.ndarray,
         res = bms(L, Nsamp=int(n_samples), alpha0=a0)
         F = compute_fe(L.T, {"a": res.posterior_parameters, "r": res.g.T},
                        {"a": a0})
-        return GroupBMSResult(
+        result = GroupBMSResult(
             posterior_parameters=res.posterior_parameters,
             model_frequency=res.model_frequency,
             exceedance_prob=res.exceedance_prob,
@@ -367,6 +437,11 @@ def group_bms(L: np.ndarray,
             g=res.g,
             F=F,
         )
+
+        if verbose:
+            _print_bms_result(result)
+
+        return result
 
     fams, names, C = _validate_partition(families, n_mod, family_names)
     nf = len(fams)
@@ -392,7 +467,7 @@ def group_bms(L: np.ndarray,
     # model-level BOR, plus the membership matrix C.
     # ORIENTATION (DEV.md §5 caveat): compute_bor/compute_fe/fe_null
     # take L as models × subjects and r as [model, subject]; bms/
-    # group_bms use subjects × models. Transpose deliberately.
+    # bms_group use subjects × models. Transpose deliberately.
     posterior = {"a": a, "r": res.g.T}
     priors = {"a": a0}
     fam_bor = compute_bor(L.T, posterior, priors, C=C)
@@ -417,7 +492,7 @@ def group_bms(L: np.ndarray,
             protected_exceedance_prob=rw.protected_exceedance_prob,
         ))
 
-    return GroupBMSResult(
+    result = GroupBMSResult(
         posterior_parameters=a,
         model_frequency=res.model_frequency,
         exceedance_prob=res.exceedance_prob,
@@ -437,6 +512,11 @@ def group_bms(L: np.ndarray,
             within=within,
         ),
     )
+
+    if verbose:
+        _print_bms_result(result)
+
+    return result
 
 
 def _tuple_machinery(n_mod: int, n_slots: int, cfam: np.ndarray):
@@ -477,7 +557,7 @@ def _best_tuple(btw: GroupBMSResult, tuples, is_eq, cfam, names) -> BestTuple:
     )
 
 
-def group_bms_btw_conds(L: np.ndarray,
+def bms_group_btw_conds(L: np.ndarray,
                         families: Optional[Sequence[Sequence[int]]] = None,
                         family_names: Optional[Sequence[str]] = None,
                         n_samples: int = 1_000_000) -> BtwCondsResult:
@@ -501,7 +581,7 @@ def group_bms_btw_conds(L: np.ndarray,
     if n_cond < 2:
         raise ValueError(
             "between-conditions BMS needs >= 2 conditions; "
-            "use group_bms(L[:, :, 0]) for a single condition")
+            "use bms_group(L[:, :, 0]) for a single condition")
     if n_mod < 2:
         raise ValueError("between-conditions BMS needs >= 2 models")
 
@@ -511,10 +591,10 @@ def group_bms_btw_conds(L: np.ndarray,
     # Tuple log-evidence: sum across conditions (within-subject).
     Lt = sum(L[:, tuples[:, c], c] for c in range(n_cond))
 
-    btw = group_bms(Lt, families=[eq_idx, neq_idx],
+    btw = bms_group(Lt, families=[eq_idx, neq_idx],
                     family_names=["equal", "not_equal"],
                     n_samples=n_samples)
-    per_cond = [group_bms(L[:, :, c], families=families,
+    per_cond = [bms_group(L[:, :, c], families=families,
                           family_names=family_names, n_samples=n_samples)
                 for c in range(n_cond)]
 
@@ -532,7 +612,7 @@ def group_bms_btw_conds(L: np.ndarray,
     )
 
 
-def group_bms_btw_groups(Ls: Sequence[np.ndarray],
+def bms_group_btw_groups(Ls: Sequence[np.ndarray],
                          families: Optional[Sequence[Sequence[int]]] = None,
                          family_names: Optional[Sequence[str]] = None,
                          n_samples: int = 1_000_000) -> BtwGroupsResult:
@@ -566,10 +646,10 @@ def group_bms_btw_groups(Ls: Sequence[np.ndarray],
         raise ValueError("between-groups BMS needs >= 2 models")
 
     # H0: one frequency vector for all subjects (pooled fit)
-    pooled = group_bms(np.vstack(Ls), families=families,
+    pooled = bms_group(np.vstack(Ls), families=families,
                        family_names=family_names, n_samples=n_samples)
     # H1: each group gets its own frequency vector (separate fits)
-    per_group = [group_bms(Lg, families=families,
+    per_group = [bms_group(Lg, families=families,
                            family_names=family_names, n_samples=n_samples)
                  for Lg in Ls]
 
@@ -595,7 +675,7 @@ def group_bms_btw_groups(Ls: Sequence[np.ndarray],
 def check_evidence_provenance(fit_results) -> dict:
     """
     Check where the log-evidence in each FitResult came from before
-    feeding it to group_bms* (DEV.md §5): evidence from the Mod 2
+    feeding it to bms_group* (DEV.md §5): evidence from the Mod 2
     eigenvalue-clip fallback (`hess_method == 'finite_diff_clipped'`,
     or any clipped eigenvalues) carries the §2.1 flat-direction
     artifact into every frequency/exceedance/PXP computed here.
