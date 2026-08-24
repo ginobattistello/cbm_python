@@ -132,11 +132,41 @@ def _style(plt):
     }
 
 
-def _panel(ax, letter, title=None, dx=-0.13, dy=1.03):
-    ax.text(dx, dy, letter, transform=ax.transAxes, fontsize=9.5,
-            fontweight="bold", va="bottom", ha="left")
+def _panel(
+    ax,
+    letter,
+    title=None,
+    subtitle=None,
+    dx=-0.13,
+    dy=1.03,
+):
+    """Add a panel label, title and optional fit-quality subtitle."""
+    ax.text(
+        dx,
+        dy,
+        letter,
+        transform=ax.transAxes,
+        fontsize=9.5,
+        fontweight="bold",
+        va="bottom",
+        ha="left",
+    )
+
     if title:
-        ax.set_title(title, pad=5)
+        # Reserve a little more vertical space when a subtitle is present.
+        ax.set_title(title, pad=14 if subtitle else 5)
+
+    if subtitle:
+        ax.text(
+            0.5,
+            1.015,
+            subtitle,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=6.4,
+            color=_GREY,
+        )
 
 
 def _require_display(result):
@@ -278,9 +308,9 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
 
     with plt.rc_context(_style(plt)):
         fig = plt.figure(figsize=figsize)
-        gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 0.88],
-                              hspace=0.55, wspace=0.28,
-                              top=0.90, bottom=0.04,
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.02],
+                              hspace=0.62, wspace=0.28,
+                              top=0.90, bottom=0.05,
                               left=0.09, right=0.97)
         axA = fig.add_subplot(gs[0, 0])
         axB = fig.add_subplot(gs[0, 1])
@@ -363,20 +393,18 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                         axA.set_ylabel("observed frequency y=1")
                         axA.grid(alpha=0.5)
 
-                        accuracy = np.mean(
-                            (pred >= 0.5).astype(int) == y_flat.astype(int)
+                        accuracy = float(
+                            np.mean(
+                                (pred >= 0.5).astype(int)
+                                == y_flat.astype(int)
+                            )
                         )
-                        axA.text(
-                            0.03,
-                            0.97,
-                            f"n={len(y_flat)} · accuracy={accuracy:.2f}",
-                            transform=axA.transAxes,
-                            ha="left",
-                            va="top",
-                            fontsize=6.7,
-                            color=_GREY,
+                        _panel(
+                            axA,
+                            "A",
+                            "binary calibration",
+                            subtitle=f"accuracy = {accuracy:.2f}",
                         )
-                        _panel(axA, "A", "binary calibration")
 
                     else:
                         # Continuous outcome: predictions and observations live
@@ -405,25 +433,38 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                         axA.set_ylabel("observed")
                         axA.grid(alpha=0.5)
 
+                        residual = y_flat - pred
                         rmse = float(
-                            np.sqrt(np.mean((y_flat - pred) ** 2))
+                            np.sqrt(np.mean(residual**2))
                         )
-                        axA.text(
-                            0.03,
-                            0.97,
-                            f"RMSE={rmse:.3g}",
-                            transform=axA.transAxes,
-                            ha="left",
-                            va="top",
-                            fontsize=6.7,
-                            color=_GREY,
+
+                        ss_res = float(np.sum(residual**2))
+                        ss_tot = float(
+                            np.sum((y_flat - np.mean(y_flat)) ** 2)
                         )
-                        _panel(axA, "A", "continuous prediction")
+                        r2 = (
+                            1.0 - ss_res / ss_tot
+                            if ss_tot > 0.0
+                            else np.nan
+                        )
+
+                        r2_text = (
+                            f"{r2:.2f}" if np.isfinite(r2) else "n/a"
+                        )
+                        _panel(
+                            axA,
+                            "A",
+                            "continuous prediction",
+                            subtitle=(
+                                f"RMSE = {rmse:.3g} · R² = {r2_text}"
+                            ),
+                        )
 
                 elif pred.ndim == 2 and pred.shape[0] == y_flat.size:
-                    # Categorical probabilistic matrix:
-                    # row i = trials where observed class is i
-                    # cell (i,j) = mean P(predicted class j | observed class i)
+                    # Categorical probabilistic diagnostic. Row i contains
+                    # trials where category i was observed; cell (i, j) is
+                    # the mean probability assigned to category j. This is
+                    # intentionally probabilistic, not a hard confusion matrix.
                     classes = np.unique(y_flat)
                     K = pred.shape[1]
 
@@ -444,11 +485,12 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                         mask = y_flat.astype(int) == cls
                         matrix[i, :] = np.mean(pred[mask, :], axis=0)
 
-                    image = axA.imshow(
+                    axA.imshow(
                         matrix,
                         vmin=0.0,
                         vmax=1.0,
                         aspect="auto",
+                        cmap="Greys",
                     )
 
                     axA.set_xticks(np.arange(K))
@@ -469,9 +511,33 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                                     ha="center",
                                     va="center",
                                     fontsize=6.2,
+                                    color=(
+                                        "white" if value >= 0.55 else "black"
+                                    ),
                                 )
 
-                    _panel(axA, "A", "categorical predicted probabilities")
+                    y_int = y_flat.astype(int)
+                    p_observed = pred[np.arange(len(y_int)), y_int]
+                    mean_p_observed = float(np.mean(p_observed))
+                    mean_log_p_observed = float(
+                        np.mean(
+                            np.log(
+                                np.clip(p_observed, 1e-12, 1.0)
+                            )
+                        )
+                    )
+
+                    _panel(
+                        axA,
+                        "A",
+                        "categorical predicted probabilities",
+                        subtitle=(
+                            f"mean P(observed) = {mean_p_observed:.2f} · "
+                            f"mean log P(observed) = "
+                            f"{mean_log_p_observed:.2f}"
+                        ),
+                    )
+
 
                 else:
                     raise ValueError(
@@ -658,14 +724,17 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
 
         axE.text(0.0, 1.0, "Status", transform=axE.transAxes,
                  fontweight="bold", va="top", fontsize=8.5)
+        # Reserve the lower footer band for the prior. Status lines are
+        # compressed into the upper band so the two sections cannot overlap.
         yv = 0.84
+        status_step = min(0.105, 0.60 / max(len(lines), 1))
         for txt, alert in lines:
             axE.text(0.0, yv, ("!  " if alert else "   ") + txt,
                      transform=axE.transAxes, va="top", fontsize=7.2,
                      family="monospace",
                      color=_ALERT if alert else "#555555",
                      fontweight="bold" if alert else "normal")
-            yv -= 0.125
+            yv -= status_step
 
         axE.text(0.42, 1.0, "Cost", transform=axE.transAxes,
                  fontweight="bold", va="top", fontsize=8.5)
@@ -686,7 +755,7 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             n_sub = np.atleast_2d(result.output.parameters).shape[0]
             cost.append(f"elapsed (all {n_sub}): {el:.2f}s")
         for k, txt in enumerate(cost):
-            axE.text(0.42, 0.84 - k * 0.125, "   " + txt,
+            axE.text(0.42, 0.84 - k * 0.105, "   " + txt,
                      transform=axE.transAxes, va="top", fontsize=7.2,
                      family="monospace", color="#333333")
 
@@ -694,12 +763,12 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                  fontweight="bold", va="top", fontsize=8.5)
         if wmsgs:
             for k, w in enumerate(wmsgs[:4]):
-                axE.text(0.70, 0.84 - k * 0.165,
+                axE.text(0.70, 0.84 - k * 0.145,
                          "!  " + (w[:78] + ("…" if len(w) > 78 else "")),
                          transform=axE.transAxes, va="top", fontsize=6.4,
                          family="monospace", color=_ALERT, wrap=True)
             if len(wmsgs) > 4:
-                axE.text(0.70, 0.84 - 4 * 0.165,
+                axE.text(0.70, 0.84 - 4 * 0.145,
                          f"   … {len(wmsgs) - 4} more",
                          transform=axE.transAxes, va="top", fontsize=6.4,
                          family="monospace", color=_GREY)
@@ -708,7 +777,12 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                      va="top", fontsize=7.2, family="monospace",
                      color="#666666")
 
-        # ---- prior, across the bottom of the strip (Mod 15) -------------
+        # ---- prior: dedicated lower footer band -------------------------
+        axE.plot(
+            [0.0, 1.0], [0.20, 0.20],
+            transform=axE.transAxes,
+            color="#DDDDDD", lw=0.6, clip_on=False,
+        )
         # The prior is part of how the estimate was produced — a figure
         # showing a posterior without it is missing half the recipe. Kept
         # on its own row so it reads as context for the whole fit rather
@@ -726,13 +800,13 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                 spec = "   ".join(
                     f"$\\theta_{{{j}}}$ N({pm_[j]:g}, {pv_[j]:g})"
                     for j in range(pm_.size))
-            axE.text(0.0, 0.02, "Prior", transform=axE.transAxes,
+            axE.text(0.0, 0.10, "Prior", transform=axE.transAxes,
                      fontweight="bold", va="bottom", fontsize=8.5)
-            axE.text(0.115, 0.02, spec, transform=axE.transAxes,
+            axE.text(0.115, 0.10, spec, transform=axE.transAxes,
                      va="bottom", fontsize=7.2, family="monospace",
                      color="#333333")
             if pdef_:
-                axE.text(0.115, 0.02, "\n" + " " * 2
+                axE.text(0.115, 0.085, "\n" + " " * 2
                          + "toolbox default (" + ", ".join(pdef_) + ") — "
                          "weakly informative, not neutral",
                          transform=axE.transAxes, va="top", fontsize=6.3,

@@ -89,10 +89,10 @@ categorical_fit = individual_fit(
     config=config,
 )
 
-print("\Categorical MAP parameters")
+print("\nCategorical MAP parameters")
 print(categorical_fit.output.parameters)
 
-print("\Categorical log model evidence")
+print("\nCategorical log model evidence")
 print(categorical_fit.output.log_evidence)
 
 categorical_fit.plot(subject=0)
@@ -115,10 +115,10 @@ continuous_fit = individual_fit(
     config=config,
 )
 
-print("\Continuous MAP parameters")
+print("\nContinuous MAP parameters")
 print(continuous_fit.output.parameters)
 
-print("\Continuous log model evidence")
+print("\nContinuous log model evidence")
 print(continuous_fit.output.log_evidence)
 
 continuous_fit.plot(subject=0)
