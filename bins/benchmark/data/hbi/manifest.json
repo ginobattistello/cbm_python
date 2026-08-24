@@ -1,0 +1,102 @@
+[
+ {
+  "name": "RLmix000",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20269219,
+  "family": "rl",
+  "design": "hbi"
+ },
+ {
+  "name": "RLmix030",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20314979,
+  "family": "rl",
+  "design": "hbi"
+ },
+ {
+  "name": "RLmix050",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20326144,
+  "family": "rl",
+  "design": "hbi"
+ },
+ {
+  "name": "RLmix070",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20272230,
+  "family": "rl",
+  "design": "hbi"
+ },
+ {
+  "name": "RLmix100",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20282328,
+  "family": "rl",
+  "design": "hbi"
+ },
+ {
+  "name": "VALmix000",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20269550,
+  "family": "value",
+  "design": "hbi"
+ },
+ {
+  "name": "VALmix030",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20294097,
+  "family": "value",
+  "design": "hbi"
+ },
+ {
+  "name": "VALmix050",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20303928,
+  "family": "value",
+  "design": "hbi"
+ },
+ {
+  "name": "VALmix070",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20359366,
+  "family": "value",
+  "design": "hbi"
+ },
+ {
+  "name": "VALmix100",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20308650,
+  "family": "value",
+  "design": "hbi"
+ }
+]

@@ -1,0 +1,26 @@
+======================================================================
+Hierarchical Bayesian Inference                    2026-08-14 17:03:25
+======================================================================
+Running in null mode
+Number of samples: 40
+Number of models: 2
+
+Initialized from:
+  /Users/gino.diez/Documents/cbm_python/examples/output/cbm_rl1.pkl [model 1]
+  /Users/gino.diez/Documents/cbm_python/examples/output/cbm_rl2.pkl [model 2]
+
+======================================================================
+Iteration 01
+Iteration 02
+                                                           dL:   11.29
+                                                           dx:    0.45
+Iteration 03
+                                                           dL:    2.44
+                                                           dx:    0.21
+Iteration 04
+                                                           dL:    1.04
+                                                           dx:    0.07
+Iteration 05
+                                                           dL:    0.62
+                                                           dx:    0.02
+                                                          Converged :]

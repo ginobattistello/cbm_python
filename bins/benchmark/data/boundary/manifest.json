@@ -1,0 +1,182 @@
+[
+ {
+  "name": "RLa0p001",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20338382,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p01",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20340861,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p05",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20327727,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p2",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20332524,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p5",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20321664,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p8",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20279137,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p95",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20269216,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p99",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20322854,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "RLa0p999",
+  "generator": "RL",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20286700,
+  "family": "rl",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr0p02",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20324231,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr0p08",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20355753,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr0p2",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20277837,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr0p5",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20301452,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr0p9",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20309011,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr1p3",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20327551,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr1p7",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20305527,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr2p5",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20330730,
+  "family": "value",
+  "design": "boundary"
+ },
+ {
+  "name": "POWr4p0",
+  "generator": "POW",
+  "n_trials": 150,
+  "beta": 0.0,
+  "n_subjects": 40,
+  "seed": 20320516,
+  "family": "value",
+  "design": "boundary"
+ }
+]

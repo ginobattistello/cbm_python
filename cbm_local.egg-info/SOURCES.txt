@@ -1,7 +1,8 @@
 LICENSE
-README.md
 pyproject.toml
 cbm/__init__.py
+cbm/display.py
+cbm/group_bms.py
 cbm/hbi.py
 cbm/hbi_bound.py
 cbm/hbi_config.py
@@ -9,12 +10,14 @@ cbm/hbi_exceedance.py
 cbm/hbi_logging.py
 cbm/hbi_types.py
 cbm/hbi_updates.py
+cbm/hessian.py
 cbm/individual_fit.py
 cbm/map_estimation.py
 cbm/model_selection.py
 cbm/optimization.py
-cbm/optimization_legacy.py
+cbm/reporting.py
 cbm_local.egg-info/PKG-INFO
 cbm_local.egg-info/SOURCES.txt
 cbm_local.egg-info/dependency_links.txt
+cbm_local.egg-info/requires.txt
 cbm_local.egg-info/top_level.txt

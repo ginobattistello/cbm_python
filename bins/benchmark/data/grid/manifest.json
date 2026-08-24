@@ -1,0 +1,226 @@
+[
+ {
+  "name": "RL_T30_b0p5",
+  "generator": "RL",
+  "n_trials": 30,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20325638
+ },
+ {
+  "name": "RL_T30_b1p0",
+  "generator": "RL",
+  "n_trials": 30,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20358403
+ },
+ {
+  "name": "RL_T30_b3p0",
+  "generator": "RL",
+  "n_trials": 30,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20336272
+ },
+ {
+  "name": "RL_T30_b8p0",
+  "generator": "RL",
+  "n_trials": 30,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20303150
+ },
+ {
+  "name": "RL_T100_b0p5",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20262717
+ },
+ {
+  "name": "RL_T100_b1p0",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20276555
+ },
+ {
+  "name": "RL_T100_b3p0",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20328570
+ },
+ {
+  "name": "RL_T100_b8p0",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20293577
+ },
+ {
+  "name": "RL_T300_b0p5",
+  "generator": "RL",
+  "n_trials": 300,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20351638
+ },
+ {
+  "name": "RL_T300_b1p0",
+  "generator": "RL",
+  "n_trials": 300,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20330446
+ },
+ {
+  "name": "RL_T300_b3p0",
+  "generator": "RL",
+  "n_trials": 300,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20357297
+ },
+ {
+  "name": "RL_T300_b8p0",
+  "generator": "RL",
+  "n_trials": 300,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20340355
+ },
+ {
+  "name": "RL2_T30_b0p5",
+  "generator": "RL2",
+  "n_trials": 30,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20343295
+ },
+ {
+  "name": "RL2_T30_b1p0",
+  "generator": "RL2",
+  "n_trials": 30,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20327287
+ },
+ {
+  "name": "RL2_T30_b3p0",
+  "generator": "RL2",
+  "n_trials": 30,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20328855
+ },
+ {
+  "name": "RL2_T30_b8p0",
+  "generator": "RL2",
+  "n_trials": 30,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20292633
+ },
+ {
+  "name": "RL2_T100_b0p5",
+  "generator": "RL2",
+  "n_trials": 100,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20292984
+ },
+ {
+  "name": "RL2_T100_b1p0",
+  "generator": "RL2",
+  "n_trials": 100,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20306472
+ },
+ {
+  "name": "RL2_T100_b3p0",
+  "generator": "RL2",
+  "n_trials": 100,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20354555
+ },
+ {
+  "name": "RL2_T100_b8p0",
+  "generator": "RL2",
+  "n_trials": 100,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20316499
+ },
+ {
+  "name": "RL2_T300_b0p5",
+  "generator": "RL2",
+  "n_trials": 300,
+  "beta": 0.5,
+  "n_subjects": 60,
+  "seed": 20308722
+ },
+ {
+  "name": "RL2_T300_b1p0",
+  "generator": "RL2",
+  "n_trials": 300,
+  "beta": 1.0,
+  "n_subjects": 60,
+  "seed": 20266459
+ },
+ {
+  "name": "RL2_T300_b3p0",
+  "generator": "RL2",
+  "n_trials": 300,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20264664
+ },
+ {
+  "name": "RL2_T300_b8p0",
+  "generator": "RL2",
+  "n_trials": 300,
+  "beta": 8.0,
+  "n_subjects": 60,
+  "seed": 20268042
+ },
+ {
+  "name": "degen_perseverative",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 50.0,
+  "n_subjects": 60,
+  "seed": 20269254
+ },
+ {
+  "name": "degen_alpha0",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20302788
+ },
+ {
+  "name": "degen_alpha1",
+  "generator": "RL",
+  "n_trials": 100,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20281611
+ },
+ {
+  "name": "degen_fewtrials",
+  "generator": "RL",
+  "n_trials": 15,
+  "beta": 3.0,
+  "n_subjects": 60,
+  "seed": 20271661
+ }
+]
