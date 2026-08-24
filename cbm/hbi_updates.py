@@ -6,7 +6,7 @@ backend.
 
 Final MAP/Hessian policy inside HBI
 -----------------------------------
-- ``model_trials[k]`` enables GN polishing of the subject MAP.
+- a model returning per-trial likelihoods enables GN polishing automatically.
 - ``models_jax[k]`` optionally enables the AD observed Hessian.
 - The final Hessian consumed by HBI is always the independent observed
   posterior Hessian returned by ``optimize_map``.
@@ -24,6 +24,7 @@ from typing import Any, List, Optional, Tuple
 import numpy as np
 from scipy.special import gammaln, psi
 
+from .parameter_space import ParameterSpace
 from .hbi_types import (
     BoundQHZ,
     BoundQM,
@@ -448,8 +449,8 @@ def hbi_qhquad(
     qmutau: List[GaussianGammaDistribution],
     qh: IndividualPosterior,
     fid,
-    model_trials: Optional[List[Optional[Any]]] = None,
     models_jax: Optional[List[Optional[Any]]] = None,
+    parameter_spaces: Optional[List[ParameterSpace]] = None,
 ) -> IndividualPosterior:
     """Refit each subject under the current hierarchical prior.
 
@@ -466,15 +467,15 @@ def hbi_qhquad(
     K = len(models)
 
     _validate_optional_model_list(
-        model_trials,
-        models,
-        "model_trials",
-    )
-    _validate_optional_model_list(
         models_jax,
         models,
         "models_jax",
     )
+
+    if parameter_spaces is None or len(parameter_spaces) != K:
+        raise ValueError(
+            "parameter_spaces must contain one free/fixed mapping per model"
+        )
 
     # Subject refits are intentionally quiet; HBI owns the high-level log.
     if fid is not None:
@@ -498,15 +499,18 @@ def hbi_qhquad(
         )
 
         cfg = deepcopy(pconfig[k])
+        parameter_space_k = parameter_spaces[k]
+
+        if parameter_space_k.d_free != Dk:
+            raise ValueError(
+                f"HBI model {k + 1}: q(mu,tau) has {Dk} free parameters "
+                f"but the model parameter space defines "
+                f"{parameter_space_k.d_free}."
+            )
 
         theta_k = np.full((Dk, N), np.nan)
         Ainvdiag_k = np.full((Dk, N), np.nan)
 
-        mt_k = (
-            None
-            if model_trials is None
-            else model_trials[k]
-        )
         mj_k = (
             None
             if models_jax is None
@@ -545,8 +549,8 @@ def hbi_qhquad(
                 prior_mean=prior.mean.flatten(),
                 prior_precision=prior.precision,
                 method="LAP",
-                model_trials=mt_k,
                 model_jax=mj_k,
+                parameter_space=parameter_space_k,
             )
 
             diag_fn = getattr(
@@ -621,7 +625,7 @@ def hbi_qhquad(
                 )
 
             logf[k, n] = logf_kn
-            theta_k[:, n] = theta_kn
+            theta_k[:, n] = np.asarray(result_kn.x, dtype=float)
             Ainvdiag_k[:, n] = np.diag(Ainv)
             logdetA[k, n] = logdetA_kn
 

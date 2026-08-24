@@ -63,6 +63,8 @@ class Config:
     prior_for_failed: bool = True
     verbose: bool = True
     save_data: bool = False
+    # If True, retain optimization diagnostics so individual_fit can
+    # automatically display the diagnostic figure after fitting.
     display: bool = False
 
     # Final observed-Hessian backend.
@@ -151,7 +153,7 @@ class PostFitDiagnostics:
     search_f: Optional[np.ndarray] = None
     polish_path: Optional[np.ndarray] = None
     polish_f: Optional[np.ndarray] = None
-    polish_lme: Optional[np.ndarray] = None
+    n_polish_steps: int = 0
     warnings: Optional[list] = None
 
 
@@ -198,10 +200,7 @@ class OptimizationResult:
     search_f: Optional[np.ndarray] = None
     polish_path: Optional[np.ndarray] = None
     polish_f: Optional[np.ndarray] = None
-
-    # Retained for compatibility with existing display/result code.
-    # Evidence is intentionally not computed during GN polishing.
-    polish_lme: Optional[np.ndarray] = None
+    n_polish_steps: int = 0
 
     @property
     def neg_log_post(self) -> float:
@@ -239,7 +238,7 @@ class OptimizationResult:
             search_f=self.search_f,
             polish_path=self.polish_path,
             polish_f=self.polish_f,
-            polish_lme=None,
+            n_polish_steps=self.n_polish_steps,
         )
 
 
@@ -488,7 +487,6 @@ class BFGSOptimizer:
                 "maxiter": self.max_iter,
                 "gtol": self.gtol,
                 "ftol": self.ftol,
-                "disp": False,
             },
         )
 
@@ -538,6 +536,7 @@ class BFGSOptimizer:
 
         trace = [] if self.display else None
         status = None
+        accepted_steps = 0
 
         for _ in range(n_steps):
             H_opt = self._gauss_newton_curvature(
@@ -582,6 +581,7 @@ class BFGSOptimizer:
             delta_f = abs(f_current - f_new)
             x = x_new
             f_current = f_new
+            accepted_steps += 1
 
             if delta_f / (1.0 + abs(f_current)) < tol_df:
                 status = ConvergenceStatus.CONVERGED_DF
@@ -600,7 +600,7 @@ class BFGSOptimizer:
             trace.append((x.copy(), f_current))
             self._temp_polish_trace = trace
 
-        return x, f_current, status
+        return x, f_current, status, accepted_steps
 
     # -----------------------------------------------------------------
     # Full optimization
@@ -730,7 +730,12 @@ class BFGSOptimizer:
         f_before_polish = best_result.f
 
         if trial_func is not None:
-            best_result.x, best_result.f, status = self._newton_polish(
+            (
+                best_result.x,
+                best_result.f,
+                status,
+                n_polish_steps,
+            ) = self._newton_polish(
                 safe_fun,
                 best_result.x,
                 trial_func=trial_func,
@@ -738,6 +743,7 @@ class BFGSOptimizer:
             )
         else:
             status = ConvergenceStatus.SKIPPED_NO_TRIAL_FUNC
+            n_polish_steps = 0
             self._temp_polish_trace = None
 
         if best_result.f > f_before_polish:
@@ -828,8 +834,9 @@ class BFGSOptimizer:
             flag = min(flag, 0.5)
 
         # -------------------------------------------------------------
-        # Optional traces. Evidence is not defined during GN polishing,
-        # so polish_lme remains None by design.
+        # Optional display traces. Both search_f and polish_f store the
+        # log joint (-negative-log-posterior), so the plot compares the
+        # same quantity across L-BFGS-B and GN polishing.
         # -------------------------------------------------------------
         search_path = search_f = None
         polish_path = polish_f = None
@@ -873,7 +880,7 @@ class BFGSOptimizer:
             search_f=search_f,
             polish_path=polish_path,
             polish_f=polish_f,
-            polish_lme=None,
+            n_polish_steps=n_polish_steps,
         )
 
     def get_all_results(self) -> List[OptimizationResult]:

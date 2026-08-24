@@ -1,89 +1,124 @@
-"""Three minimal cognitive-model examples in NumPy and JAX."""
-from __future__ import annotations
+"""Minimal model definitions for the unified CBM API.
+
+Every model accepts the same standardized subject data:
+
+    data = {
+        "y": observed outcomes,
+        "X": model inputs,
+    }
+
+A model may return:
+- a scalar summed log-likelihood, or
+- a vector of per-trial log-likelihoods.
+
+Returning a vector automatically enables the GN polish.
+"""
+
 import numpy as np
 
-try:
-    import jax
-    import jax.numpy as jnp
-except ImportError:
-    jax = None
-    jnp = None
+
+def _softmax(x):
+    z = x - np.max(x)
+    e = np.exp(z)
+    return e / np.sum(e)
 
 
-def _softmax_np(x):
-    z=x-np.max(x); e=np.exp(z); return e/e.sum()
+# ---------------------------------------------------------------------
+# Binary Rescorla-Wagner + softmax
+# ---------------------------------------------------------------------
 
-def _softmax_jax(x):
-    z=x-jnp.max(x); e=jnp.exp(z); return e/e.sum()
+def binary_observation(theta, data):
+    """Return P(choice=1) on every trial."""
+    alpha, beta = theta
+    y = np.asarray(data["y"], dtype=int)
+    rewards = np.asarray(data["X"]["reward"], dtype=float)
 
+    q = np.zeros(2)
+    p1 = np.zeros(len(y))
 
-# ---------- binary RW ----------
-def binary_rw_trials(theta, data):
-    alpha,beta=theta
-    q=np.zeros(2); ll=[]
-    for a,r in zip(data["choice"],data["reward"]):
-        p=_softmax_np(beta*q)
-        ll.append(np.log(np.clip(p[a],1e-12,1)))
-        q[a]+=alpha*(r-q[a])
-    return np.asarray(ll)
+    for t, (choice, reward) in enumerate(zip(y, rewards)):
+        p = _softmax(beta * q)
+        p1[t] = p[1]
+        q[choice] += alpha * (reward - q[choice])
 
-def binary_rw(theta,data):
-    return float(np.sum(binary_rw_trials(theta,data)))
-
-def binary_rw_jax(theta,data):
-    alpha,beta=theta
-    choice=jnp.asarray(data["choice"],dtype=jnp.int32)
-    reward=jnp.asarray(data["reward"])
-    def step(q,xs):
-        a,r=xs
-        p=_softmax_jax(beta*q)
-        ll=jnp.log(jnp.clip(p[a],1e-12,1))
-        q=q.at[a].add(alpha*(r-q[a]))
-        return q,ll
-    _,ll=jax.lax.scan(step,jnp.zeros(2),(choice,reward))
-    return jnp.sum(ll)
+    return p1
 
 
-# ---------- categorical RW ----------
-def categorical_rw_trials(theta,data):
-    alpha,beta=theta
-    q=np.zeros(3); ll=[]
-    for a,r in zip(data["choice"],data["reward"]):
-        p=_softmax_np(beta*q)
-        ll.append(np.log(np.clip(p[a],1e-12,1)))
-        q[a]+=alpha*(r-q[a])
-    return np.asarray(ll)
+def binary_model(theta, data):
+    """Per-trial binary log-likelihood; GN is therefore available."""
+    y = np.asarray(data["y"], dtype=int)
+    p1 = np.clip(
+        binary_observation(theta, data),
+        1e-12,
+        1.0 - 1e-12,
+    )
 
-def categorical_rw(theta,data):
-    return float(np.sum(categorical_rw_trials(theta,data)))
-
-def categorical_rw_jax(theta,data):
-    alpha,beta=theta
-    choice=jnp.asarray(data["choice"],dtype=jnp.int32)
-    reward=jnp.asarray(data["reward"])
-    def step(q,xs):
-        a,r=xs
-        p=_softmax_jax(beta*q)
-        ll=jnp.log(jnp.clip(p[a],1e-12,1))
-        q=q.at[a].add(alpha*(r-q[a]))
-        return q,ll
-    _,ll=jax.lax.scan(step,jnp.zeros(3),(choice,reward))
-    return jnp.sum(ll)
+    return (
+        y * np.log(p1)
+        + (1 - y) * np.log(1.0 - p1)
+    )
 
 
-# ---------- CES ----------
-def ces_trials(theta,data):
-    alpha,rho=theta
-    x1,x2,y,sigma=data["x1"],data["x2"],data["y"],data["sigma"]
-    v=(alpha*x1**rho+(1-alpha)*x2**rho)**(1/rho)
-    return -0.5*((y-v)/sigma)**2-np.log(sigma*np.sqrt(2*np.pi))
+# ---------------------------------------------------------------------
+# Categorical Rescorla-Wagner + softmax
+# ---------------------------------------------------------------------
 
-def ces(theta,data):
-    return float(np.sum(ces_trials(theta,data)))
+def categorical_observation(theta, data):
+    """Return T x K choice-probability matrix."""
+    alpha, beta = theta
+    y = np.asarray(data["y"], dtype=int)
+    rewards = np.asarray(data["X"]["reward"], dtype=float)
+    n_options = int(data["X"]["n_options"])
 
-def ces_jax(theta,data):
-    alpha,rho=theta
-    x1,x2=jnp.asarray(data["x1"]),jnp.asarray(data["x2"])
-    y,sigma=jnp.asarray(data["y"]),data["sigma"]
-    v=(alpha*x1**rho+(1-alpha)*x2**rho)**(1/rho)
-    return jnp.sum(-0.5*((y-v)/sigma)**2-jnp.log(sigma*jnp.sqrt(2*jnp.pi)))
+    q = np.zeros(n_options)
+    probs = np.zeros((len(y), n_options))
+
+    for t, (choice, reward) in enumerate(zip(y, rewards)):
+        p = _softmax(beta * q)
+        probs[t] = p
+        q[choice] += alpha * (reward - q[choice])
+
+    return probs
+
+
+def categorical_model(theta, data):
+    """Per-trial categorical log-likelihood."""
+    y = np.asarray(data["y"], dtype=int)
+    probs = np.clip(
+        categorical_observation(theta, data),
+        1e-12,
+        1.0,
+    )
+    return np.log(probs[np.arange(len(y)), y])
+
+
+# ---------------------------------------------------------------------
+# Continuous Gaussian linear model
+# ---------------------------------------------------------------------
+
+def continuous_observation(theta, data):
+    """Return the predicted conditional mean."""
+    intercept, slope = theta
+    x = np.asarray(data["X"]["x"], dtype=float)
+    return intercept + slope * x
+
+
+def continuous_model(theta, data):
+    """Per-observation Gaussian log-likelihood."""
+    y = np.asarray(data["y"], dtype=float)
+    sigma = float(data["X"]["sigma"])
+    mu = continuous_observation(theta, data)
+
+    return (
+        -0.5 * ((y - mu) / sigma) ** 2
+        - np.log(sigma * np.sqrt(2.0 * np.pi))
+    )
+
+
+# ---------------------------------------------------------------------
+# Scalar example
+# ---------------------------------------------------------------------
+
+def continuous_model_scalar(theta, data):
+    """Same model, but summed manually: GN is unavailable."""
+    return float(np.sum(continuous_model(theta, data)))

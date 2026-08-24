@@ -1,47 +1,24 @@
 """
-Diagnostic figures for a fit (MODIFICATION 14).
+Diagnostic plots for individual CBM fits.
 
-WHAT THIS IS
-------------
-`Config.display = True` makes the optimizer retain what a diagnostic plot
-needs — the L-BFGS-B evaluation path, the Newton-polish trace, and the
-warnings raised per subject. `FitResult.plot()` then draws it. Nothing here
-runs during fitting, and with `display=False` (the default) nothing is
-retained, so the cost to every existing caller is exactly zero.
+``Config(display=True)`` retains diagnostics and automatically shows the fit
+figure after fitting.
 
-Maps the intent of VBA's display options (`options.DisplayWin`,
-`VBA_initDisplay`) onto this toolbox's structures. It is not a port: VBA
-runs its own Gauss-Newton loop and can show a clean per-iteration trace,
-whereas here the bulk of the work is inside scipy's L-BFGS-B.
+Data convention
+---------------
+Each subject is standardized as:
 
-TWO FIGURES, BECAUSE THE QUESTION DIFFERS
------------------------------------------
-ONE SUBJECT   How did this fit go? Trajectories, the objective climbing,
-              observed vs predicted, and the status/warnings that apply.
+    data = {"y": observed_outcomes, "X": model_inputs}
 
-MANY SUBJECTS What does the population look like? Parameter distributions,
-              evidence spread, quality counts, timing. Trajectories are
-              deliberately absent — twenty overlaid zigzags say nothing,
-              and per-subject detail is what `plot(subject=i)` is for.
+When an ``observation(theta, data)`` function is supplied, panel A is chosen
+automatically:
 
-THREE HONESTY NOTES, ALL VISIBLE IN THE FIGURES
------------------------------------------------
-1. `search_path` is function EVALUATIONS, including line-search probes —
-   not clean iterations. The path zigzags. Axes say "function evaluations"
-   so it cannot be misread as an iteration count.
+- binary y + probability vector (T,) -> calibration plot
+- categorical y + probability matrix (T, K) -> probabilistic class matrix
+- continuous y + prediction vector (T,) -> observed-vs-predicted scatter
 
-2. A per-step LOG-EVIDENCE exists only for the Newton-polish steps. The
-   Laplace evidence needs |H|, and the polish loop is the only place H is
-   recomputed each step; during L-BFGS-B there is no Hessian at all. So
-   the objective panel plots the log-JOINT over the search and the
-   log-EVIDENCE over the polish, as two segments, never as one curve.
-
-3. Without `predict=`/`observed=` there is no way to compute a residual —
-   `data` is opaque to the toolbox. The panel then shows per-trial
-   log-likelihood instead and says so in its title (individual_fit also
-   warns at fit time).
-
-REFERENCE  DEV.md §17.
+The optimization panel shows the log joint during both L-BFGS-B and optional
+GN polishing. GN curvature is never displayed as evidence curvature.
 """
 
 import warnings
@@ -117,35 +94,27 @@ def _mpl():
 
 
 def _show(plt):
-    """Open the figure window.
+    """Show the current matplotlib figure.
 
-    Non-blocking when possible. A plain `plt.show()` blocks until the
-    window is closed, so a script drawing two figures shows the second
-    only after you dismiss the first — which reads like the second one
-    never appeared. `block=False` draws both, then the script's own
-    `plt.show()` (or the interactive prompt) keeps them alive.
-
-    On a non-interactive backend ("Agg", i.e. headless, CI, SSH without
-    X) no window is possible; say so once rather than failing silently,
-    because "nothing popped up" is otherwise indistinguishable from a
-    broken plot.
+    There is intentionally no user-facing ``show`` or ``block`` option.
+    ``display`` is the only visibility switch used by the toolbox.
     """
     import matplotlib
+
     backend = matplotlib.get_backend()
     if backend.lower() == "agg":
         warnings.warn(
-            f"show=True but the matplotlib backend is {backend!r}, which "
-            f"cannot open a window (headless session, or something called "
-            f"matplotlib.use('Agg')). The figure was still created and "
-            f"save=... works. Use an interactive backend for a window.",
-            UserWarning, stacklevel=3)
+            f"display=True but the matplotlib backend is {backend!r}, "
+            "which cannot open a window. The figure was still created; "
+            "use an interactive matplotlib backend to display it.",
+            UserWarning,
+            stacklevel=3,
+        )
         return
-    try:
-        plt.show(block=False)
-        plt.pause(0.1)          # let the GUI event loop actually paint it
-    except Exception:
-        plt.show()              # any backend that dislikes block=False
 
+    # Plain matplotlib behavior is used deliberately. No separate blocking
+    # policy is maintained by CBM.
+    plt.show()
 
 def _style(plt):
     return {
@@ -175,9 +144,8 @@ def _require_display(result):
     if dd is None:
         raise ValueError(
             "this result carries no display data. Re-fit with "
-            "config=dict(display=True) — the optimizer only retains the "
-            "trajectories, traces and warnings that plot() needs when "
-            "display is enabled (Mod 14, DEV.md §17).")
+            "Config(display=True). The display option both retains the "
+            "diagnostics and shows the fit figure after fitting.")
     return dd
 
 
@@ -195,63 +163,113 @@ def _real_warnings(diag) -> List[str]:
 
 
 def _flag_lines(result, i: int) -> List[tuple]:
-    """(text, is_alert) status lines for subject i."""
+    """Return ``(text, is_alert)`` status lines for one subject."""
     diag = None
     dl = getattr(result.math, "diagnostics", None)
     if dl is not None and i < len(dl):
         diag = dl[i]
+
     flag = float(np.ravel(result.math.flag)[i])
 
-    lines = []
     if diag is None:
-        lines.append(("fit FAILED — prior substituted "
-                      "(config.prior_for_failed)", True))
-        return lines
+        return [
+            (
+                "MAP optimization failed — prior substituted "
+                "(config.prior_for_failed)",
+                True,
+            )
+        ]
+
+    lines = []
 
     status = getattr(diag, "convergence_status", None)
-    lines.append((f"convergence: {status}",
-                  status not in ("converged_df", "no_improvement")))
-    lines.append((f"curvature: {getattr(diag, 'hess_method', '?')}", False))
-    lines.append((f"|gradient|: {getattr(diag, 'abs_grad', float('nan')):.2e}",
-                  False))
+    healthy_status = status in (
+        "converged_df",
+        "no_improvement",
+        "skipped_no_trial_func",
+    )
+    lines.append(
+        (
+            f"MAP optimization: {status}",
+            not healthy_status,
+        )
+    )
+
+    lines.append(
+        (
+            f"observed Hessian: {getattr(diag, 'hess_method', '?')}",
+            False,
+        )
+    )
+
+    laplace_valid = bool(getattr(diag, "laplace_valid", False))
+    lines.append(
+        (
+            f"Laplace valid: {'yes' if laplace_valid else 'NO'}",
+            not laplace_valid,
+        )
+    )
+
+    min_eig = getattr(diag, "hess_raw_min_eig", None)
+    if min_eig is not None:
+        lines.append(
+            (
+                f"min Hessian eigenvalue: {min_eig:.2e}",
+                min_eig <= 0,
+            )
+        )
+
+    lines.append(
+        (
+            f"|gradient|: {getattr(diag, 'abs_grad', float('nan')):.2e}",
+            False,
+        )
+    )
 
     nia = getattr(diag, "n_inits_agreeing", None)
     nr = getattr(diag, "n_runs", None)
     if nia is not None:
-        lines.append((f"inits agreeing: {nia}/{nr}", nia == 0))
-
-    wi = getattr(diag, "weak_identifiability", None)
-    if wi is not None:
-        lines.append((f"identifiability: {wi:.2f}x prior precision",
-                      wi < 2.0))
-
-    nclip = getattr(diag, "hess_n_clipped", None)
-    if nclip:
-        lines.append((f"clipped eigenvalues: {nclip}", True))
+        lines.append(
+            (f"inits agreeing: {nia}/{nr}", nia == 0)
+        )
 
     ahb = getattr(diag, "at_hard_bounds", None)
     if ahb is not None and np.any(ahb):
-        idx = [j for j, b in enumerate(np.ravel(ahb)) if b]
-        lines.append((f"at hard bounds: theta{idx}", True))
+        idx = [
+            j for j, value in enumerate(np.ravel(ahb)) if value
+        ]
+        lines.append(
+            (f"MAP at hard bounds: theta{idx}", True)
+        )
 
-    if flag == 0.5:
-        lines.append(("flag 0.5 — singular Hessian at the optimum", True))
+    if flag == 1.0:
+        lines.append(("fit flag 1.0 — accepted", False))
+    elif flag == 0.5:
+        lines.append(
+            (
+                "fit flag 0.5 — MAP retained with warning",
+                True,
+            )
+        )
+    elif flag == 0.0:
+        lines.append(("fit flag 0.0 — fit failed", True))
+    else:
+        lines.append((f"fit flag {flag:g}", flag < 1.0))
+
     return lines
-
 
 # ===========================================================================
 # SINGLE SUBJECT
 # ===========================================================================
 
 def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
-                 save: Optional[str] = None, show: bool = False):
+                 save: Optional[str] = None, display: bool = True):
     """Diagnostic figure for one subject.
 
-    A  observed vs predicted (or per-trial log-likelihood — see note 3)
+    A  prediction diagnostic chosen from y and observation(theta, data)
     B  parameter trajectories over the search, with the final +/-1 SE band
-    C  objective evolution: log-joint over the search, log-evidence over
-       the polish (note 2)
-    D  per-trial log-likelihood at the final estimate
+    C  objective evolution: log-joint during L-BFGS-B and GN polish
+    D  parameter estimates with 95% intervals
     E  status, flags and warnings — full width across the bottom
     """
     plt = _mpl()
@@ -277,80 +295,215 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
         dl = getattr(result.math, "diagnostics", None)
         diag = dl[subject] if (dl is not None and subject < len(dl)) else None
         data_i = dd["data"][subject]
-        predict, observed = dd["predict"], dd["observed"]
-        mtrials = dd["model_trials"]
+        observation = dd.get("observation")
 
-        # ---- A: observed vs predicted, or the fallback ------------------
-        did_scatter = False
-        if predict is not None and observed is not None:
+        # ---- A: outcome-specific prediction diagnostic -------------------
+        y = np.asarray(data_i["y"])
+        if observation is not None:
             try:
-                y = np.ravel(np.asarray(observed(data_i), dtype=float))
-                yh = np.ravel(np.asarray(predict(theta, data_i),
-                                         dtype=float))
-                ok = np.isfinite(y) & np.isfinite(yh)
-                y, yh = y[ok], yh[ok]
-                if y.size:
-                    lo = float(min(y.min(), yh.min()))
-                    hi = float(max(y.max(), yh.max()))
-                    pad = 0.05 * (hi - lo or 1.0)
-                    axA.plot([lo - pad, hi + pad], [lo - pad, hi + pad],
-                             color=_GREY, lw=0.9, ls=(0, (4, 3)), zorder=1)
-                    axA.scatter(yh, y, s=9, color=_INK, alpha=0.6,
-                                linewidths=0, zorder=3)
-                    ss = float(np.sum((y - yh) ** 2))
-                    st = float(np.sum((y - y.mean()) ** 2))
-                    r2 = 1.0 - ss / st if st > 0 else np.nan
-                    axA.set_xlabel("predicted")
-                    axA.set_ylabel("observed")
-                    axA.text(0.04, 0.95,
-                             f"$R^2$ = {r2:.3f}\nRMSE = "
-                             f"{np.sqrt(ss / y.size):.4g}",
-                             transform=axA.transAxes, va="top", fontsize=7,
-                             color="#333333")
-                    axA.set_xlim(lo - pad, hi + pad)
-                    axA.set_ylim(lo - pad, hi + pad)
-                    axA.set_aspect("equal", adjustable="box")
-                    _panel(axA, "A", "observed vs predicted")
-                    did_scatter = True
-            except Exception as e:
-                # A user-supplied callable that raises must not lose the
-                # whole figure; fall through to the per-trial panel.
-                axA.text(0.5, 0.5, f"predict/observed raised:\n"
-                                   f"{type(e).__name__}: {e}",
-                         transform=axA.transAxes, ha="center", va="center",
-                         fontsize=7, color=_INK_DARK, wrap=True)
-                _panel(axA, "A", "observed vs predicted — failed")
-                did_scatter = True
+                pred = np.asarray(
+                    observation(theta, data_i),
+                    dtype=float,
+                )
 
-        if not did_scatter:
-            ll = None
-            if mtrials is not None:
-                try:
-                    ll = np.ravel(np.asarray(mtrials(theta, data_i),
-                                             dtype=float))
-                except Exception:
-                    ll = None
-            if ll is not None and ll.size:
-                axA.plot(np.arange(ll.size), ll, lw=0.8, color=_INK,
-                         alpha=0.85)
-                axA.axhline(float(np.mean(ll)), color=_INK_DARK, lw=0.9,
-                            ls=(0, (4, 3)),
-                            label=f"mean {np.mean(ll):.3f}")
-                axA.set_xlabel("trial")
-                axA.set_ylabel("log-likelihood")
-                axA.legend(loc="lower right")
-                _panel(axA, "A", "per-trial fit  (no predict/observed)")
-                axA.text(0.02, 0.04,
-                         "pass predict= and observed= for\n"
-                         "observed-vs-predicted instead",
-                         transform=axA.transAxes, fontsize=6.2,
-                         color=_GREY, va="bottom")
-            else:
-                axA.text(0.5, 0.5, "no predict/observed and no\n"
-                                   "model_trials — nothing to show",
-                         transform=axA.transAxes, ha="center", va="center",
-                         fontsize=7.5, color=_GREY)
-                _panel(axA, "A", "fit quality — unavailable")
+                y_flat = np.asarray(y).reshape(-1)
+
+                if pred.ndim == 1 and pred.size == y_flat.size:
+                    unique_y = np.unique(y_flat)
+                    is_binary = (
+                        unique_y.size <= 2
+                        and np.all(np.isin(unique_y, [0, 1]))
+                        and np.all((pred >= 0.0) & (pred <= 1.0))
+                    )
+
+                    if is_binary:
+                        # Binary probabilistic calibration. Quantile bins keep
+                        # useful occupancy even for peaked choice models.
+                        n_bins = min(8, max(3, int(np.sqrt(pred.size))))
+                        edges = np.linspace(0.0, 1.0, n_bins + 1)
+
+                        xs = []
+                        ys = []
+                        ns = []
+
+                        for b in range(n_bins):
+                            if b == n_bins - 1:
+                                mask = (
+                                    (pred >= edges[b])
+                                    & (pred <= edges[b + 1])
+                                )
+                            else:
+                                mask = (
+                                    (pred >= edges[b])
+                                    & (pred < edges[b + 1])
+                                )
+
+                            if np.any(mask):
+                                xs.append(float(np.mean(pred[mask])))
+                                ys.append(float(np.mean(y_flat[mask])))
+                                ns.append(int(np.sum(mask)))
+
+                        axA.plot(
+                            [0, 1],
+                            [0, 1],
+                            ls="--",
+                            lw=0.8,
+                            color=_GREY,
+                        )
+                        axA.plot(
+                            xs,
+                            ys,
+                            marker="o",
+                            lw=1.1,
+                            color=_INK_DARK,
+                        )
+                        axA.set_xlim(-0.02, 1.02)
+                        axA.set_ylim(-0.02, 1.02)
+                        axA.set_xlabel("predicted P(y=1)")
+                        axA.set_ylabel("observed frequency y=1")
+                        axA.grid(alpha=0.5)
+
+                        accuracy = np.mean(
+                            (pred >= 0.5).astype(int) == y_flat.astype(int)
+                        )
+                        axA.text(
+                            0.03,
+                            0.97,
+                            f"n={len(y_flat)} · accuracy={accuracy:.2f}",
+                            transform=axA.transAxes,
+                            ha="left",
+                            va="top",
+                            fontsize=6.7,
+                            color=_GREY,
+                        )
+                        _panel(axA, "A", "binary calibration")
+
+                    else:
+                        # Continuous outcome: predictions and observations live
+                        # in the same one-dimensional space.
+                        axA.scatter(
+                            pred,
+                            y_flat,
+                            s=12,
+                            alpha=0.65,
+                            color=_INK,
+                        )
+
+                        lo = float(np.nanmin([pred.min(), y_flat.min()]))
+                        hi = float(np.nanmax([pred.max(), y_flat.max()]))
+
+                        if np.isfinite(lo) and np.isfinite(hi):
+                            axA.plot(
+                                [lo, hi],
+                                [lo, hi],
+                                ls="--",
+                                lw=0.8,
+                                color=_GREY,
+                            )
+
+                        axA.set_xlabel("predicted")
+                        axA.set_ylabel("observed")
+                        axA.grid(alpha=0.5)
+
+                        rmse = float(
+                            np.sqrt(np.mean((y_flat - pred) ** 2))
+                        )
+                        axA.text(
+                            0.03,
+                            0.97,
+                            f"RMSE={rmse:.3g}",
+                            transform=axA.transAxes,
+                            ha="left",
+                            va="top",
+                            fontsize=6.7,
+                            color=_GREY,
+                        )
+                        _panel(axA, "A", "continuous prediction")
+
+                elif pred.ndim == 2 and pred.shape[0] == y_flat.size:
+                    # Categorical probabilistic matrix:
+                    # row i = trials where observed class is i
+                    # cell (i,j) = mean P(predicted class j | observed class i)
+                    classes = np.unique(y_flat)
+                    K = pred.shape[1]
+
+                    if (
+                        not np.all(np.equal(np.mod(classes, 1), 0))
+                        or np.min(classes) < 0
+                        or np.max(classes) >= K
+                    ):
+                        raise ValueError(
+                            "categorical observation expects integer labels "
+                            "between 0 and K-1"
+                        )
+
+                    classes = classes.astype(int)
+                    matrix = np.full((len(classes), K), np.nan)
+
+                    for i, cls in enumerate(classes):
+                        mask = y_flat.astype(int) == cls
+                        matrix[i, :] = np.mean(pred[mask, :], axis=0)
+
+                    image = axA.imshow(
+                        matrix,
+                        vmin=0.0,
+                        vmax=1.0,
+                        aspect="auto",
+                    )
+
+                    axA.set_xticks(np.arange(K))
+                    axA.set_xticklabels(np.arange(K))
+                    axA.set_yticks(np.arange(len(classes)))
+                    axA.set_yticklabels(classes)
+                    axA.set_xlabel("predicted category")
+                    axA.set_ylabel("observed category")
+
+                    for i in range(matrix.shape[0]):
+                        for j in range(matrix.shape[1]):
+                            value = matrix[i, j]
+                            if np.isfinite(value):
+                                axA.text(
+                                    j,
+                                    i,
+                                    f"{value:.2f}",
+                                    ha="center",
+                                    va="center",
+                                    fontsize=6.2,
+                                )
+
+                    _panel(axA, "A", "categorical predicted probabilities")
+
+                else:
+                    raise ValueError(
+                        "observation output must be (T,) for binary/continuous "
+                        "data or (T, K) for categorical data"
+                    )
+
+            except Exception as exc:
+                axA.text(
+                    0.5,
+                    0.5,
+                    f"observation() raised:\n{type(exc).__name__}: {exc}",
+                    ha="center",
+                    va="center",
+                    transform=axA.transAxes,
+                    fontsize=7.0,
+                    color=_GREY,
+                )
+                _panel(axA, "A", "prediction diagnostic — failed")
+
+        else:
+            axA.text(
+                0.5,
+                0.5,
+                "no observation() supplied",
+                ha="center",
+                va="center",
+                transform=axA.transAxes,
+                fontsize=7.5,
+                color=_GREY,
+            )
+            _panel(axA, "A", "prediction diagnostic")
 
         # ---- B: parameter trajectories ---------------------------------
         sp = getattr(diag, "search_path", None) if diag is not None else None
@@ -401,72 +554,82 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             _panel(axB, "B", "parameter path")
 
         # ---- C: objective evolution ------------------------------------
-        # See note 2: two different quantities, plotted as two segments.
+        # Both traces show the same quantity: the log joint. The observed
+        # Hessian is computed only after optimization, so evidence is not
+        # defined at intermediate GN polish steps.
         sf = getattr(diag, "search_f", None) if diag is not None else None
-        plme = getattr(diag, "polish_lme", None) if diag is not None else None
+        pf = getattr(diag, "polish_f", None) if diag is not None else None
+
         drew = False
+
         if sf is not None and len(sf):
             sf = np.asarray(sf, dtype=float)
-            axC.plot(np.arange(sf.size), np.maximum.accumulate(sf),
-                     lw=1.1, color=_INK_DARK, label="log-joint (best so far)")
-            axC.plot(np.arange(sf.size), sf, lw=0.5, color=_INK,
-                     alpha=0.35, label="log-joint (each evaluation)")
+            x_search = np.arange(sf.size)
+            axC.plot(
+                x_search,
+                np.maximum.accumulate(sf),
+                lw=1.1,
+                color=_INK_DARK,
+                label="L-BFGS-B log-joint (best so far)",
+            )
+            axC.plot(
+                x_search,
+                sf,
+                lw=0.5,
+                color=_INK,
+                alpha=0.30,
+                label="L-BFGS-B evaluations",
+            )
             axC.set_xlabel("function evaluations")
             axC.set_ylabel("log-joint")
             drew = True
-        # The polish is typically 2-3 steps against tens of evaluations.
-        # Sharing the x-axis would stretch those few points across the
-        # whole panel and make a 1e-10 change look like a sweep — the
-        # exact misreading note 2 warns about. So the evidence goes in an
-        # inset with its OWN x-axis, and its total change is stated in
-        # words rather than left to the eye.
-        if plme is not None and len(plme) and np.isfinite(plme).any():
-            pl = np.asarray(plme, dtype=float)
-            fin = pl[np.isfinite(pl)]
-            span = float(fin.max() - fin.min()) if fin.size > 1 else 0.0
-            if drew:
-                # Square, upper-right. The previous placement put the
-                # inset's x-label on top of the host axis's own x-axis.
-                ins = axC.inset_axes([0.62, 0.44, 0.33, 0.33])
-            else:
-                ins = axC
-            # Plot the CHANGE from the first step, not the absolute value.
-            # Absolute log-evidence over 2-3 near-identical steps forces
-            # matplotlib into an offset label like "1e-6 - 1.0496e2",
-            # which is unreadable and buries the one number that matters:
-            # how much the evidence actually moved.
-            ins.plot(np.arange(pl.size), pl - fin[0], lw=1.2, marker="o",
-                     ms=3.0, color=_INK_DARK)
-            ins.set_title("log-evidence", fontsize=6.2, pad=2,
-                          color=_INK_DARK)
-            ins.tick_params(labelsize=5.5, length=1.8, pad=1)
-            ins.set_xlabel("polish step", fontsize=5.8, labelpad=1)
-            # Polish steps are counts: 0.5 of a step does not exist.
-            ins.xaxis.get_major_locator().set_params(integer=True)
-            # Baseline on the y-label rather than a title that overflows
-            # the panel; keeps the inset square and self-explanatory.
-            ins.set_ylabel(f"$\\Delta$ from {fin[0]:.2f}", fontsize=5.3,
-                           labelpad=1)
-            ins.ticklabel_format(axis="y", style="sci", scilimits=(-2, 3))
-            ins.yaxis.get_offset_text().set_fontsize(5.0)
-            for sp_ in ins.spines.values():
-                sp_.set_linewidth(0.5)
-            # A flat line is the normal, healthy case; say so instead of
-            # letting matplotlib autoscale noise into a dramatic curve.
-            if span < 1e-6:
-                ins.set_ylim(-1.0, 1.0)
-                ins.text(0.5, 0.80, f"flat ({span:.1e})", fontsize=5.5,
-                         color=_GREY, ha="center", transform=ins.transAxes)
-            drew = True
+
+        if pf is not None and len(pf):
+            pf = np.asarray(pf, dtype=float)
+            finite_pf = pf[np.isfinite(pf)]
+
+            if finite_pf.size:
+                # GN usually contains only a few accepted steps, so an inset
+                # preserves their scale without pretending that polish steps
+                # are L-BFGS-B function evaluations.
+                ins = (
+                    axC.inset_axes([0.60, 0.43, 0.35, 0.36])
+                    if drew
+                    else axC
+                )
+                ins.plot(
+                    np.arange(pf.size),
+                    pf,
+                    lw=1.2,
+                    marker="o",
+                    ms=3.0,
+                    color=_INK_DARK,
+                )
+                ins.set_title("GN polish · log-joint", fontsize=6.2, pad=2)
+                ins.set_xlabel("polish step", fontsize=5.8, labelpad=1)
+                ins.tick_params(labelsize=5.5, length=1.8, pad=1)
+                ins.xaxis.get_major_locator().set_params(integer=True)
+                for spine in ins.spines.values():
+                    spine.set_linewidth(0.5)
+                drew = True
+
         if drew:
             axC.grid(alpha=0.6)
-            _panel(axC, "C", "objective evolution")
-
+            if sf is not None and len(sf):
+                axC.legend(loc="lower right", fontsize=6.2)
+            _panel(axC, "C", "log-joint during optimization")
         else:
-            axC.text(0.5, 0.5, "no trace retained", ha="center",
-                     va="center", transform=axC.transAxes, fontsize=7.5,
-                     color=_GREY)
-            _panel(axC, "C", "objective evolution")
+            axC.text(
+                0.5,
+                0.5,
+                "no optimization trace retained",
+                ha="center",
+                va="center",
+                transform=axC.transAxes,
+                fontsize=7.5,
+                color=_GREY,
+            )
+            _panel(axC, "C", "log-joint during optimization")
 
         # ---- D: parameter estimates with CI ----------------------------
         yy = np.arange(d)
@@ -512,8 +675,13 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             cost.append(f"initializations: {nit}")
         if sf is not None:
             cost.append(f"evaluations: {len(sf)}")
-        if plme is not None:
-            cost.append(f"polish steps: {len(plme)}")
+        n_polish = (
+            getattr(diag, "n_polish_steps", None)
+            if diag is not None
+            else None
+        )
+        if n_polish is not None:
+            cost.append(f"GN polish steps: {n_polish}")
         if el is not None:
             n_sub = np.atleast_2d(result.output.parameters).shape[0]
             cost.append(f"elapsed (all {n_sub}): {el:.2f}s")
@@ -576,7 +744,7 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
 
         if save:
             fig.savefig(save, bbox_inches="tight")
-        if show:
+        if display:
             _show(plt)
         return fig
 
@@ -586,7 +754,7 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
 # ===========================================================================
 
 def plot_group(result, figsize=(9.0, 6.2), save: Optional[str] = None,
-               show: bool = False):
+               display: bool = True):
     """Population-level figure: no trajectories, by design.
 
     A  parameter distributions across subjects (violin + points)
@@ -730,7 +898,7 @@ def plot_group(result, figsize=(9.0, 6.2), save: Optional[str] = None,
 
         if save:
             fig.savefig(save, bbox_inches="tight")
-        if show:
+        if display:
             _show(plt)
         return fig
 
@@ -847,30 +1015,26 @@ def _in_notebook() -> bool:
         return False
 
 
-def plot(result, subject: Optional[int] = None, backend: str = "auto",
-         html_path: Optional[str] = None, **kw):
-    """Diagnostic figure. Dispatches on how many subjects were fitted.
+def plot(
+    result,
+    subject: Optional[int] = None,
+    backend: str = "auto",
+    html_path: Optional[str] = None,
+    display: bool = True,
+    **kw,
+):
+    """Create a diagnostic figure.
 
-    subject=None (default): the group figure for a multi-subject fit, or
-    the single-subject figure when only one subject was fitted — so a
-    one-subject fit never shows a "distribution" of one point.
-    subject=i: force the per-subject figure.
+    ``display`` is the only visibility switch. ``Config(display=True)`` calls
+    this function automatically after fitting. Calling ``fit.plot()`` later
+    defaults to ``display=True`` and shows the retained diagnostics again.
 
-    backend:
-      "auto"  (default) behave as before — build the figure and return
-              it. `show=True` opens a matplotlib window where the
-              environment allows one.
-      "html"  render the same figure into a self-contained HTML page and
-              open it in a browser. Independent of the matplotlib
-              backend, so it works headless, over SSH, and anywhere a
-              browser exists. Returns the figure; the path is also
-              printed and available as `fig._cbm_html_path`.
-      "mpl"   explicit synonym for "auto".
+    ``subject=None`` shows the group figure for multi-subject fits and the
+    single-subject figure for a one-subject fit. ``subject=i`` forces the
+    per-subject figure.
 
-    html_path: where to write the page (default: a temp file).
-
-    Extra keyword arguments go to the underlying plotter: `save=path`
-    writes a PNG/PDF, `show=True` opens a matplotlib window.
+    ``backend='html'`` writes the figure to a self-contained HTML page; in
+    that case no matplotlib window is opened.
     """
     backend = (backend or "auto").lower()
     if backend not in ("auto", "mpl", "matplotlib", "html"):
@@ -883,18 +1047,21 @@ def plot(result, subject: Optional[int] = None, backend: str = "auto",
         raise IndexError(
             f"subject {subject} out of range: this fit has {n}")
 
-    # The HTML path never wants a matplotlib window as well.
-    if backend == "html":
-        kw.pop("show", None)
+    # HTML rendering never opens a matplotlib window as well.
+    plot_display = bool(display and backend != "html")
 
     if subject is not None:
-        fig = plot_subject(result, subject=subject, **kw)
+        fig = plot_subject(
+            result, subject=subject, display=plot_display, **kw
+        )
         which = f"subject {subject}"
     elif n == 1:
-        fig = plot_subject(result, subject=0, **kw)
+        fig = plot_subject(
+            result, subject=0, display=plot_display, **kw
+        )
         which = "subject 0"
     else:
-        fig = plot_group(result, **kw)
+        fig = plot_group(result, display=plot_display, **kw)
         which = f"{n} subjects"
 
     if backend == "html":

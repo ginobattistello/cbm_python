@@ -128,9 +128,9 @@ class BoundState:
 class HBIInput:
     """Inputs required to reproduce an HBI run.
 
-    ``model_trials`` and ``models_jax`` are optional derivative backends:
-    - model_trials[k]: per-trial NumPy likelihood for GN MAP polishing
-    - models_jax[k]: summed JAX likelihood for optional AD Hessians
+    ``models_jax`` optionally supplies a JAX implementation for the AD
+    observed-Hessian backend. GN availability is inferred directly from
+    each NumPy model's scalar-or-trialwise return value.
     """
 
     models: List[Any]
@@ -138,8 +138,8 @@ class HBIInput:
     fname: str
     config: Any
     optimconfigs: Any
-    model_trials: Optional[List[Any]] = None
     models_jax: Optional[List[Any]] = None
+    parameter_spaces: Optional[List[Any]] = None
 
 
 @dataclass

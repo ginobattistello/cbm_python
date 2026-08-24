@@ -1,30 +1,83 @@
-from __future__ import annotations
+"""Small simulators using the standardized y/X data format."""
+
 import numpy as np
 
-def softmax(x):
-    z=x-np.max(x); e=np.exp(z); return e/e.sum()
 
-def binary_subject(rng, theta=(0.35,3.0), n=150):
-    alpha,beta=theta; q=np.zeros(2); c=[]; r=[]
-    p_reward=np.array([0.75,0.25])
-    for _ in range(n):
-        p=softmax(beta*q); a=rng.choice(2,p=p)
-        rew=float(rng.random()<p_reward[a])
-        c.append(a); r.append(rew); q[a]+=alpha*(rew-q[a])
-    return {"choice":np.asarray(c),"reward":np.asarray(r)}
+def _softmax(x):
+    z = x - np.max(x)
+    e = np.exp(z)
+    return e / np.sum(e)
 
-def categorical_subject(rng, theta=(0.35,3.0), n=150):
-    alpha,beta=theta; q=np.zeros(3); c=[]; r=[]
-    p_reward=np.array([0.75,0.50,0.25])
-    for _ in range(n):
-        p=softmax(beta*q); a=rng.choice(3,p=p)
-        rew=float(rng.random()<p_reward[a])
-        c.append(a); r.append(rew); q[a]+=alpha*(rew-q[a])
-    return {"choice":np.asarray(c),"reward":np.asarray(r)}
 
-def ces_subject(rng, theta=(0.60,0.30), n=150, sigma=0.20):
-    alpha,rho=theta
-    x1=rng.uniform(0.5,2,n); x2=rng.uniform(0.5,2,n)
-    v=(alpha*x1**rho+(1-alpha)*x2**rho)**(1/rho)
-    y=v+rng.normal(0,sigma,n)
-    return {"x1":x1,"x2":x2,"y":y,"sigma":sigma}
+def binary_subject(rng, theta=(0.35, 3.0), n_trials=150):
+    alpha, beta = theta
+    reward_prob = np.array([0.75, 0.25])
+
+    q = np.zeros(2)
+    y = np.zeros(n_trials, dtype=int)
+    rewards = np.zeros(n_trials)
+
+    for t in range(n_trials):
+        p = _softmax(beta * q)
+        choice = rng.choice(2, p=p)
+        reward = float(rng.random() < reward_prob[choice])
+
+        y[t] = choice
+        rewards[t] = reward
+        q[choice] += alpha * (reward - q[choice])
+
+    return {
+        "y": y,
+        "X": {"reward": rewards},
+    }
+
+
+def categorical_subject(
+    rng,
+    theta=(0.35, 3.0),
+    n_trials=150,
+    n_options=3,
+):
+    alpha, beta = theta
+    reward_prob = np.linspace(0.75, 0.25, n_options)
+
+    q = np.zeros(n_options)
+    y = np.zeros(n_trials, dtype=int)
+    rewards = np.zeros(n_trials)
+
+    for t in range(n_trials):
+        p = _softmax(beta * q)
+        choice = rng.choice(n_options, p=p)
+        reward = float(rng.random() < reward_prob[choice])
+
+        y[t] = choice
+        rewards[t] = reward
+        q[choice] += alpha * (reward - q[choice])
+
+    return {
+        "y": y,
+        "X": {
+            "reward": rewards,
+            "n_options": n_options,
+        },
+    }
+
+
+def continuous_subject(
+    rng,
+    theta=(1.0, 2.0),
+    n_trials=150,
+    sigma=0.5,
+):
+    intercept, slope = theta
+    x = rng.uniform(-2.0, 2.0, n_trials)
+    mu = intercept + slope * x
+    y = mu + rng.normal(0.0, sigma, n_trials)
+
+    return {
+        "y": y,
+        "X": {
+            "x": x,
+            "sigma": sigma,
+        },
+    }

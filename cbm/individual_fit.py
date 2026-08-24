@@ -17,8 +17,8 @@ Important
 A valid MAP is NOT discarded merely because the observed Hessian is
 non-positive-definite. In that case:
 
-    parameters         = MAP estimate
-    hessian            = raw observed Hessian
+    parameters         = full MAP vector (fixed values included)
+    hessian            = free-parameter observed Hessian
     log_evidence       = NaN
     log_det_hessian    = NaN
     hessian_inv_diag   = NaN
@@ -41,6 +41,7 @@ import numpy as np
 
 from .map_estimation import optimize_map, log_posterior
 from .optimization import Config, PostFitDiagnostics
+from .parameter_space import ParameterSpace
 
 
 # ---------------------------------------------------------------------
@@ -53,47 +54,50 @@ DEFAULT_PRIOR_MEAN = 0.0
 
 @dataclass
 class Prior:
-    """Gaussian prior specification."""
+    """Gaussian prior plus free/fixed parameter mapping.
+
+    A zero prior variance fixes that model parameter exactly at its prior mean.
+    Only parameters with positive variance enter optimization and Laplace
+    integration.
+    """
 
     mean: np.ndarray
     variance: np.ndarray | float
     precision: Optional[np.ndarray] = None
+    space: Optional[ParameterSpace] = None
 
     def __post_init__(self):
-        mean = np.asarray(self.mean, dtype=float).reshape(-1)
-        d = mean.size
+        self.space = ParameterSpace.from_prior(
+            self.mean,
+            self.variance,
+        )
 
-        variance = np.asarray(self.variance, dtype=float)
+        self.mean = self.space.full_mean.reshape(-1, 1)
 
-        if variance.ndim == 0:
-            covariance = float(variance) * np.eye(d)
-        elif variance.ndim == 1:
-            if variance.size != d:
-                raise ValueError(
-                    f"prior_variance has length {variance.size}; "
-                    f"expected {d}."
-                )
-            covariance = np.diag(variance)
-        elif variance.shape == (d, d):
-            covariance = variance
-        else:
-            raise ValueError(
-                "prior_variance must be a scalar, length-d vector, "
-                f"or ({d}, {d}) covariance matrix."
-            )
+        # ``precision`` is kept in full model coordinates for result metadata.
+        # Fixed rows/columns are zero; the true Gaussian precision used for
+        # inference is ``space.free_precision``.
+        self.precision = self.space.full_precision
 
-        covariance = 0.5 * (covariance + covariance.T)
+    @property
+    def free_mean(self) -> np.ndarray:
+        return self.space.free_mean
 
-        try:
-            np.linalg.cholesky(covariance)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError(
-                "Prior covariance must be positive definite."
-            ) from exc
+    @property
+    def free_precision(self) -> np.ndarray:
+        return self.space.free_precision
 
-        self.mean = mean.reshape(-1, 1)
-        self.precision = np.linalg.inv(covariance)
+    @property
+    def free_mask(self) -> np.ndarray:
+        return self.space.free_mask
 
+    @property
+    def fixed_mask(self) -> np.ndarray:
+        return self.space.fixed_mask
+
+    @property
+    def d_free(self) -> int:
+        return self.space.d_free
 
 def _resolve_prior(
     prior_mean,
@@ -150,50 +154,70 @@ def _resolve_prior(
 # ---------------------------------------------------------------------
 
 def _preflight_checks(data, model, prior: Prior, config: Config):
-    """Validate inputs once before subject-level fitting."""
+    """Validate standardized data and model output before fitting."""
     if len(data) == 0:
         raise ValueError("data is empty: nothing to fit")
 
-    d = prior.mean.size
+    d_full = prior.mean.size
 
-    if config.d != d:
+    if config.d != d_full:
         raise ValueError(
-            f"config.d ({config.d}) != prior dimension ({d})"
+            f"config.d ({config.d}) != model/prior dimension ({d_full})"
         )
-
-    if prior.precision.shape != (d, d):
-        raise ValueError(
-            f"prior precision must be ({d}, {d}), "
-            f"got {prior.precision.shape}"
-        )
-
-    try:
-        np.linalg.cholesky(prior.precision)
-    except np.linalg.LinAlgError as exc:
-        raise ValueError(
-            "prior precision must be positive definite"
-        ) from exc
 
     theta0 = prior.mean.flatten()
     nonfinite = []
 
     for n, subject_data in enumerate(data):
+        if not isinstance(subject_data, dict):
+            raise TypeError(
+                "Each subject must be a dictionary with keys 'y' and 'X'. "
+                f"Subject {n + 1} has type {type(subject_data).__name__}."
+            )
+
+        missing = [key for key in ("y", "X") if key not in subject_data]
+        if missing:
+            raise ValueError(
+                f"Subject {n + 1} is missing required data key(s): {missing}. "
+                "Use data[n] = {'y': observed_outcomes, 'X': model_inputs}."
+            )
+
         try:
-            value = model(theta0, subject_data)
+            raw = model(theta0, subject_data)
+            arr = np.asarray(raw, dtype=float)
         except Exception as exc:
             raise ValueError(
-                f"model raised at prior mean for subject {n + 1}: "
-                f"{exc!r}"
+                f"model raised at prior mean for subject {n + 1}: {exc!r}"
             ) from exc
 
-        if not np.isfinite(value):
+        if arr.ndim > 1:
+            raise ValueError(
+                f"model for subject {n + 1} returned shape {arr.shape}. "
+                "It must return either a scalar or a one-dimensional "
+                "per-trial log-likelihood vector."
+            )
+
+        if arr.size == 0 or not np.all(np.isfinite(arr)):
             nonfinite.append(n + 1)
+
+        if arr.ndim == 1:
+            y = np.asarray(subject_data["y"])
+            if y.ndim == 0:
+                raise ValueError(
+                    f"Subject {n + 1}: trialwise model output requires "
+                    "data['y'] to contain one outcome per observation."
+                )
+            if arr.size != y.shape[0]:
+                raise ValueError(
+                    f"Subject {n + 1}: model returned {arr.size} likelihood "
+                    f"terms but data['y'] contains {y.shape[0]} outcomes."
+                )
 
     if nonfinite:
         warnings.warn(
-            "Model returns a non-finite log-likelihood at the prior "
-            f"mean for subject(s) {nonfinite}. Random starts may still "
-            "find a finite region, but these fits deserve scrutiny."
+            "Model returns a non-finite likelihood at the prior mean for "
+            f"subject(s) {nonfinite}. Random starts may still find a finite "
+            "region, but these fits deserve scrutiny."
         )
 
 
@@ -209,6 +233,10 @@ class FitInput:
     fname: Optional[str]
     prior_variance: Optional[np.ndarray | float] = None
     prior_defaults: tuple = ()
+    free_mask: Optional[np.ndarray] = None
+    fixed_mask: Optional[np.ndarray] = None
+    fixed_values: Optional[np.ndarray] = None
+    n_free_parameters: Optional[int] = None
 
 
 @dataclass
@@ -283,13 +311,21 @@ class FitResult:
         self,
         subject: Optional[int] = None,
         backend: str = "auto",
+        display: bool = True,
         **kwargs,
     ):
+        """Plot retained diagnostics.
+
+        ``display`` is the only visibility switch. The same option is used by
+        ``Config(display=True)`` during fitting. No separate ``show`` or
+        ``block`` option is exposed.
+        """
         from .display import plot as _plot
         return _plot(
             self,
             subject=subject,
             backend=backend,
+            display=display,
             **kwargs,
         )
 
@@ -346,20 +382,14 @@ def _resolve_config(
 
 def individual_fit(
     data: List[Any],
-    model: Callable[[np.ndarray, Any], float],
+    model: Callable[[np.ndarray, Any], Any],
     prior_mean: Optional[np.ndarray] = None,
     prior_variance: Optional[np.ndarray | float] = None,
     fname: Optional[str] = None,
     config: Optional[Union[Config, dict]] = None,
-    model_trials: Optional[
-        Callable[[np.ndarray, Any], np.ndarray]
-    ] = None,
     model_jax: Optional[Callable] = None,
-    predict: Optional[
+    observation: Optional[
         Callable[[np.ndarray, Any], np.ndarray]
-    ] = None,
-    observed: Optional[
-        Callable[[Any], np.ndarray]
     ] = None,
 ) -> FitResult:
     """Fit a computational model independently to multiple subjects.
@@ -369,13 +399,22 @@ def individual_fit(
     data
         List containing one data object per subject.
     model
-        NumPy model returning the SUMMED log-likelihood:
+        NumPy likelihood function. It may return either:
 
             model(theta, subject_data) -> scalar
 
+        for a summed log-likelihood, or:
+
+            model(theta, subject_data) -> (T,)
+
+        for per-trial/per-observation log-likelihoods. A trialwise return
+        enables the GN polish automatically; the toolbox sums it internally
+        for L-BFGS-B.
+
     prior_mean, prior_variance
-        Gaussian prior in parameter space. Missing values are filled
-        with the documented toolbox defaults.
+        Gaussian prior in model-parameter space. A zero variance fixes
+        that parameter exactly at its prior mean; positive-variance
+        parameters are estimated. Missing values use toolbox defaults.
     fname
         Optional pickle output path.
     config
@@ -383,32 +422,28 @@ def individual_fit(
 
         Relevant optimizer options include:
 
-            display
+            display  # retain diagnostics and show the plot after fitting
             verbose
             num_init
             hessian_method = "central_fd" | "autodiff"
             hessian_step
 
-    model_trials
-        Optional NumPy function returning per-trial log-likelihoods:
-
-            model_trials(theta, subject_data) -> (T,)
-
-        This is used ONLY for the Gauss-Newton MAP polish.
-        It does not define the final Hessian.
-
     model_jax
-        Optional JAX implementation of the same SUMMED
-        log-likelihood as ``model``.
+        Optional JAX implementation following the same scalar-or-vector
+        likelihood contract as ``model``. Required only when
+        ``config.hessian_method == "autodiff"``.
 
-        Required only for:
+    observation
+        Optional observation function used only for display:
 
-            config.hessian_method == "autodiff"
+            observation(theta, subject_data) -> predictions
 
-        and used only for the final AD observed Hessian.
+        Subject data must use the standardized structure:
 
-    predict, observed
-        Optional display helpers. They do not enter the fit.
+            {"y": observed_outcomes, "X": model_inputs}
+
+        ``display.py`` reads ``y`` directly and calls ``observation`` with
+        the fitted full parameter vector and the complete subject data.
 
     Returns
     -------
@@ -440,6 +475,7 @@ def individual_fit(
         variance=prior_variance,
     )
     config = _resolve_config(config, d)
+    d_free = prior.d_free
 
     if (
         getattr(config, "hessian_method", "central_fd")
@@ -452,23 +488,18 @@ def individual_fit(
 
     _preflight_checks(data, model, prior, config)
 
-    if (
-        getattr(config, "display", False)
-        and (predict is None or observed is None)
-    ):
-        missing = [
-            name
-            for name, value in (
-                ("predict", predict),
-                ("observed", observed),
-            )
-            if value is None
-        ]
+    probe = np.asarray(
+        model(prior.mean.flatten(), data[0]),
+        dtype=float,
+    )
+    model_is_trialwise = probe.ndim == 1
 
+
+    if getattr(config, "display", False) and observation is None:
         warnings.warn(
-            f"display=True without {' and '.join(missing)}. "
-            "Observed-vs-predicted display will use its fallback "
-            "representation."
+            "display=True without observation=. Prediction diagnostics will "
+            "be omitted; optimization, parameter, evidence, and status "
+            "diagnostics will still be shown."
         )
 
     n_subjects = len(data)
@@ -483,8 +514,15 @@ def individual_fit(
         )
         print("=" * 70)
         print(f"Number of subjects: {n_subjects}")
-        print(f"Number of parameters: {d}")
+        print(f"Number of model parameters: {d}")
+        print(f"Free parameters: {d_free}")
+        print(f"Fixed parameters: {d - d_free}")
         print(f"Number of initializations: {config.num_init}")
+        print(
+            "Model likelihood: "
+            + ("per-trial (GN available)" if model_is_trialwise
+               else "scalar (L-BFGS-B only)")
+        )
         print(
             "Observed Hessian: "
             f"{getattr(config, 'hessian_method', 'central_fd')}"
@@ -530,11 +568,11 @@ def individual_fit(
                     subject_data,
                     model,
                     config,
-                    prior.mean.flatten(),
-                    prior.precision,
+                    prior.free_mean,
+                    prior.free_precision,
                     method="LAP",
-                    model_trials=model_trials,
                     model_jax=model_jax,
+                    parameter_space=prior.space,
                 )
 
             subject_warnings = [
@@ -563,11 +601,11 @@ def individual_fit(
                 subject_data,
                 model,
                 config,
-                prior.mean.flatten(),
-                prior.precision,
+                prior.free_mean,
+                prior.free_precision,
                 method="LAP",
-                model_trials=model_trials,
                 model_jax=model_jax,
+                parameter_space=prior.space,
             )
 
         diag_n = result_n.diagnostics()
@@ -599,14 +637,23 @@ def individual_fit(
                 )
 
             parameters_n = prior.mean.flatten()
+
+            # Evaluate the fallback in free coordinates while the cognitive
+            # model still receives the complete parameter vector.
+            def _model_free(theta_free, subject_data_):
+                return model(
+                    prior.space.expand(theta_free),
+                    subject_data_,
+                )
+
             log_joint_n = log_posterior(
-                parameters_n,
-                model,
+                prior.free_mean,
+                _model_free,
                 subject_data,
-                prior.mean.flatten(),
-                prior.precision,
+                prior.free_mean,
+                prior.free_precision,
             )
-            hessian_n = prior.precision.copy()
+            hessian_n = prior.free_precision.copy()
             grad_n = np.full(d, np.nan)
 
             # Legacy fallback has no optimizer diagnostics.
@@ -665,9 +712,9 @@ def individual_fit(
                     "Evidence is set to NaN."
                 )
 
-                hessian_inv_diag.append(
-                    np.full(d, np.nan)
-                )
+                invalid_diag = np.zeros(d, dtype=float)
+                invalid_diag[prior.free_mask] = np.nan
+                hessian_inv_diag.append(invalid_diag)
                 log_det_hessian[n] = np.nan
                 lme[n] = np.nan
 
@@ -676,20 +723,23 @@ def individual_fit(
 
             else:
                 hessian_inv_diag.append(
-                    np.diag(hessian_inv)
+                    prior.space.expand_free_vector(
+                        np.diag(hessian_inv),
+                        fixed_value=0.0,
+                    )
                 )
                 log_det_hessian[n] = log_det_hess
 
                 lme[n] = (
                     log_joint_n
-                    + 0.5 * d * np.log(2.0 * np.pi)
+                    + 0.5 * d_free * np.log(2.0 * np.pi)
                     - 0.5 * log_det_hess
                 )
 
         else:
-            hessian_inv_diag.append(
-                np.full(d, np.nan)
-            )
+            invalid_diag = np.zeros(d, dtype=float)
+            invalid_diag[prior.free_mask] = np.nan
+            hessian_inv_diag.append(invalid_diag)
             log_det_hessian[n] = np.nan
             lme[n] = np.nan
 
@@ -712,6 +762,10 @@ def individual_fit(
         fname=fname,
         prior_variance=prior_variance,
         prior_defaults=prior_defaults,
+        free_mask=prior.free_mask.copy(),
+        fixed_mask=prior.fixed_mask.copy(),
+        fixed_values=prior.space.fixed_values.copy(),
+        n_free_parameters=d_free,
     )
 
     profile = FitProfile(
@@ -753,9 +807,9 @@ def individual_fit(
     if getattr(config, "display", False):
         fit._display_data = {
             "data": data,
-            "predict": predict,
-            "observed": observed,
-            "model_trials": model_trials,
+            "observation": observation,
+            "free_mask": prior.free_mask.copy(),
+            "fixed_mask": prior.fixed_mask.copy(),
         }
 
     if fname is not None:
@@ -772,5 +826,10 @@ def individual_fit(
                 f"{n_invalid}/{n_subjects} subject(s)."
             )
         print("done :]")
+
+    # ``display`` is the single plotting switch: when enabled it both
+    # retained the diagnostics above and now shows the appropriate figure.
+    if getattr(config, "display", False):
+        fit.plot(display=True)
 
     return fit

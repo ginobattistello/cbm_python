@@ -9,7 +9,7 @@ HBI repeatedly refits each subject under the current hierarchical prior.
 
 The final MAP architecture is respected throughout:
 - multi-start L-BFGS-B
-- optional GN polish when ``model_trials`` is supplied
+- automatic GN polish when a model returns per-trial likelihoods
 - independent observed Hessian at the MAP
 - central finite differences by default
 - optional JAX autodiff Hessian through ``models_jax``
@@ -32,6 +32,7 @@ import numpy as np
 from scipy.special import gammaln, psi
 
 from .hbi_config import HBIConfig
+from .parameter_space import ParameterSpace
 from .hbi_exceedance import cbm_hbi_exceedance
 from .hbi_logging import (
     hbi_log,
@@ -285,9 +286,6 @@ def hbi_main(
         Union[HBIConfig, Dict[str, Any]]
     ] = None,
     optimconfigs: Optional[List[Any]] = None,
-    model_trials: Optional[
-        List[Optional[Any]]
-    ] = None,
     models_jax: Optional[
         List[Optional[Any]]
     ] = None,
@@ -310,9 +308,10 @@ def hbi_main(
     optimconfigs
         Optional MAP optimizer configs, one per model. If omitted, HBI uses
         the config stored in each individual-fit result.
-    model_trials
-        Optional per-model per-trial NumPy likelihoods. These enable GN MAP
-        polishing during HBI refits; they do not define the final Hessian.
+    models
+        Each model may return either a scalar log-likelihood or a one-dimensional
+        vector of per-trial log-likelihoods. Trialwise models automatically
+        receive GN polishing during HBI refits.
     models_jax
         Optional per-model JAX summed likelihoods. A model uses this only when
         its optimizer config requests ``hessian_method='autodiff'``.
@@ -322,11 +321,6 @@ def hbi_main(
             "models and fcbm_maps must have the same length"
         )
 
-    _validate_optional_model_list(
-        model_trials,
-        models,
-        "model_trials",
-    )
     _validate_optional_model_list(
         models_jax,
         models,
@@ -352,7 +346,6 @@ def hbi_main(
         "fname": fname,
         "config": config,
         "optimconfigs": optimconfigs,
-        "model_trials": model_trials,
         "models_jax": models_jax,
     }
 
@@ -396,12 +389,10 @@ def hbi_run(
     models = user_input["models"]
     fcbm_maps = user_input["fcbm_maps"]
     fname = user_input.get("fname", "")
-    model_trials = user_input.get(
-        "model_trials"
-    )
     models_jax = user_input.get(
         "models_jax"
     )
+    parameter_spaces = inits["parameter_spaces"]
 
     K = len(models)
     N = len(data)
@@ -568,8 +559,8 @@ def hbi_run(
                 qmutau,
                 qhquad,
                 fid,
-                model_trials=model_trials,
                 models_jax=models_jax,
+                parameter_spaces=parameter_spaces,
             )
 
             # q(H, Z): responsibilities.
@@ -654,23 +645,31 @@ def hbi_run(
         # ----------------------------------------------------------
         # Final output
         # ----------------------------------------------------------
-        he_list: List[np.ndarray] = [
-            None
-        ] * K
+        he_list: List[np.ndarray] = [None] * K
         nk_vec = np.zeros(K, dtype=float)
+        group_mean = [None] * K
 
         for k in range(K):
             nu = qmutau[k].nu
             beta = qmutau[k].beta
-            sigma = np.asarray(
-                qmutau[k].sigma
+            sigma = np.asarray(qmutau[k].sigma)
+            space = parameter_spaces[k]
+
+            if space.d_free:
+                s2 = 2.0 * sigma / beta
+                nk = 2.0 * nu
+                he_free = np.sqrt(s2 / nk)
+            else:
+                nk = 2.0 * nu
+                he_free = np.empty(0, dtype=float)
+
+            # User-facing HBI summaries stay in complete model coordinates.
+            he_list[k] = space.expand_free_vector(
+                he_free,
+                fixed_value=0.0,
             )
-
-            s2 = 2.0 * sigma / beta
-            nk = 2.0 * nu
-
-            he_list[k] = np.sqrt(
-                s2 / nk
+            group_mean[k] = space.expand(
+                np.asarray(qmutau[k].a, dtype=float).reshape(-1)
             )
             nk_vec[k] = nk
 
@@ -679,15 +678,17 @@ def hbi_run(
             is_null=isnull,
         )
 
-        theta_out = [
-            qhquad.parameters[k].T
-            for k in range(K)
-        ]
-
-        group_mean = [
-            qmutau[k].a.copy()
-            for k in range(K)
-        ]
+        theta_out = []
+        for k in range(K):
+            space = parameter_spaces[k]
+            theta_free = qhquad.parameters[k]
+            theta_full = np.vstack(
+                [
+                    space.expand(theta_free[:, n])
+                    for n in range(N)
+                ]
+            )
+            theta_out.append(theta_full)
 
         output = HBIOutput(
             parameters=theta_out,
@@ -713,8 +714,8 @@ def hbi_run(
             fname=fname,
             config=config,
             optimconfigs=optconfigs,
-            model_trials=model_trials,
             models_jax=models_jax,
+            parameter_spaces=parameter_spaces,
         )
 
         cbm_math = HBIMath(
@@ -791,38 +792,61 @@ def hbi_init(
         for cbm_map in cbm_maps
     ]
 
-    # Initial individual posterior approximation.
+    # Initial individual posterior approximation. HBI group distributions
+    # contain only free parameters; fixed parameters are reconstructed only
+    # for user-facing outputs and model evaluation.
     theta = []
     Ainvdiag = []
     logdetA = []
     logf = []
     a0 = []
+    parameter_spaces = []
 
-    for cbm_map in cbm_maps:
+    for k, cbm_map in enumerate(cbm_maps):
+        prior_mean_full = np.asarray(
+            cbm_map.profile.prior_mean,
+            dtype=float,
+        ).reshape(-1)
+
+        prior_variance = getattr(
+            cbm_map.input,
+            "prior_variance",
+            None,
+        )
+
+        if prior_variance is not None:
+            space = ParameterSpace.from_prior(
+                prior_mean_full,
+                prior_variance,
+            )
+        else:
+            # Backward compatibility for older map files: all parameters
+            # were free in the original CBM convention.
+            prior_precision = np.asarray(
+                cbm_map.profile.prior_precision,
+                dtype=float,
+            )
+            space = ParameterSpace.all_free(
+                prior_mean_full,
+                prior_precision,
+            )
+
+        parameter_spaces.append(space)
+
         logf.append(
-            np.asarray(
-                cbm_map.math.loglik,
-                dtype=float,
-            )
+            np.asarray(cbm_map.math.loglik, dtype=float)
         )
-        a0.append(
-            np.asarray(
-                cbm_map.profile.prior_mean,
-                dtype=float,
-            )
-        )
+        a0.append(space.free_mean.reshape(-1, 1))
 
-        theta.append(
-            np.column_stack(
-                cbm_map.math.parameters
-            )
+        theta_full = np.column_stack(
+            cbm_map.math.parameters
         )
+        theta.append(theta_full[space.free_mask, :])
 
-        Ainvdiag.append(
-            np.column_stack(
-                cbm_map.math.hessian_inv_diag
-            )
+        invdiag_full = np.column_stack(
+            cbm_map.math.hessian_inv_diag
         )
+        Ainvdiag.append(invdiag_full[space.free_mask, :])
 
         logdetA.append(
             np.asarray(
@@ -993,6 +1017,7 @@ def hbi_init(
         "qh": qh,
         "r": r,
         "bound": bound,
+        "parameter_spaces": parameter_spaces,
     }
 
     priors = {
@@ -1010,8 +1035,9 @@ def hbi_null(
 ) -> HBIResult:
     """Compute protected exceedance probabilities using the HBI null model.
 
-    The null rerun preserves the same ``model_trials`` and ``models_jax``
-    backends as the original HBI run.
+    The null rerun preserves the same optional ``models_jax`` backend as
+    the original HBI run. GN availability continues to be inferred directly
+    from each model output.
     """
     input_is_file = isinstance(
         fname_cbm,
@@ -1113,11 +1139,6 @@ def hbi_null(
         "fname": fname0,
         "config": config_null,
         "optimconfigs": cbm.input.optimconfigs,
-        "model_trials": getattr(
-            cbm.input,
-            "model_trials",
-            None,
-        ),
         "models_jax": getattr(
             cbm.input,
             "models_jax",

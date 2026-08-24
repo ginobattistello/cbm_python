@@ -1,27 +1,32 @@
-"""MAP estimation for CBM.
+"""MAP estimation with a single model-likelihood interface.
 
-This module connects cognitive models to the MAP optimizer.
+Public model contract
+---------------------
+``model(theta, data)`` may return either:
 
-Final architecture
-------------------
-1. ``model`` defines the scalar NumPy log-likelihood.
-2. ``model_trials`` is optional and returns per-trial log-likelihoods.
-   When supplied, it enables the Gauss-Newton polish used ONLY for MAP
-   optimization.
-3. The final observed Hessian is computed independently at the MAP:
-       - central finite differences by default;
-       - JAX autodiff when ``Config.hessian_method == "autodiff"`` and
-         the modeller supplies ``model_jax``.
-4. ``result.hess`` is therefore always the observed posterior Hessian,
-   never the Gauss-Newton optimization curvature.
+1. a scalar
+       summed log-likelihood
+       -> L-BFGS-B optimization
+       -> GN polish unavailable
 
-The returned field historically named ``loglik`` is retained for backward
-compatibility. It is the log joint at the MAP,
+2. a one-dimensional vector of length T
+       per-trial/per-observation log-likelihoods
+       -> internally summed for L-BFGS-B
+       -> retained separately for GN polishing
 
-    log p(y, theta_MAP | model)
-      = log likelihood + log prior,
+This removes the redundant ``model_trials`` argument. The toolbox detects the
+model output type once at the prior mean and uses the same convention for the
+entire fit.
 
-not the bare log-likelihood.
+The optional ``model_jax`` follows the same scalar-or-vector contract. Its
+output is internally summed before the full negative log posterior is
+differentiated for the optional AD Hessian.
+
+Fixed parameters
+----------------
+When a ``ParameterSpace`` is supplied, cognitive models still receive the full
+parameter vector while optimization and Laplace inference operate only on the
+free coordinates.
 """
 
 from __future__ import annotations
@@ -30,17 +35,22 @@ from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 
-from .optimization import BFGSOptimizer, Config, OptimizationResult
+from .optimization import (
+    BFGSOptimizer,
+    Config,
+    ConvergenceStatus,
+    OptimizationResult,
+)
+from .parameter_space import ParameterSpace
 
 
 def _validate_prior(
     prior_mean: np.ndarray,
     prior_precision: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Validate and normalize Gaussian-prior inputs."""
+    """Validate the Gaussian prior over FREE parameters."""
     prior_mean = np.asarray(prior_mean, dtype=float).reshape(-1)
     prior_precision = np.asarray(prior_precision, dtype=float)
-
     d = prior_mean.size
 
     if prior_precision.shape != (d, d):
@@ -49,62 +59,110 @@ def _validate_prior(
             f"got {prior_precision.shape}"
         )
 
-    prior_precision = 0.5 * (
-        prior_precision + prior_precision.T
-    )
+    if d == 0:
+        return prior_mean, np.empty((0, 0)), 0.0
 
-    sign, log_det_precision = np.linalg.slogdet(prior_precision)
-    if sign <= 0:
-        raise ValueError("prior_precision must be positive definite.")
+    prior_precision = 0.5 * (prior_precision + prior_precision.T)
 
     try:
         np.linalg.cholesky(prior_precision)
     except np.linalg.LinAlgError as exc:
         raise ValueError(
-            "prior_precision must be positive definite."
+            "prior_precision over free parameters must be positive definite."
         ) from exc
 
-    return prior_mean, prior_precision, float(log_det_precision)
+    sign, logdet = np.linalg.slogdet(prior_precision)
+    if sign <= 0:
+        raise ValueError(
+            "prior_precision over free parameters must have positive "
+            "determinant."
+        )
+
+    return prior_mean, prior_precision, float(logdet)
+
+
+def _model_output(
+    model: Callable,
+    theta_full: np.ndarray,
+    data: Any,
+) -> tuple[float, Optional[np.ndarray]]:
+    """Evaluate a NumPy model and classify its output.
+
+    Returns
+    -------
+    summed_loglik
+        Scalar likelihood used by the optimizer.
+    trial_loglik
+        ``None`` for scalar models, otherwise the one-dimensional trialwise
+        log-likelihood vector used by GN.
+    """
+    raw = model(theta_full, data)
+    arr = np.asarray(raw, dtype=float)
+
+    if arr.ndim == 0:
+        value = float(arr)
+        if not np.isfinite(value):
+            raise ValueError("model returned a non-finite scalar likelihood")
+        return value, None
+
+    if arr.ndim != 1:
+        raise ValueError(
+            "model must return either a scalar summed log-likelihood or a "
+            "one-dimensional vector of per-trial log-likelihoods; "
+            f"got shape {arr.shape}."
+        )
+
+    if arr.size == 0:
+        raise ValueError("model returned an empty likelihood vector")
+
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(
+            "model returned non-finite per-trial log-likelihood values"
+        )
+
+    return float(np.sum(arr)), arr
+
+
+def _detect_trialwise_model(
+    model: Callable,
+    theta_full: np.ndarray,
+    data: Any,
+) -> bool:
+    """Return True when ``model`` exposes per-trial likelihood values."""
+    _, trial = _model_output(model, theta_full, data)
+    return trial is not None
 
 
 def log_posterior(
     parameters: np.ndarray,
-    model: Callable[[np.ndarray, Any], float],
+    model: Callable[[np.ndarray, Any], Any],
     data: Any,
     prior_mean: np.ndarray,
     prior_precision: np.ndarray,
     log_det_precision: Optional[float] = None,
 ) -> float:
-    """Compute the positive Gaussian-prior log joint.
+    """Compute the positive log joint.
 
-    Returns
-    -------
-    float
-        log p(y, theta | model)
-        = log p(y | theta, model) + log p(theta | model).
-
-    Notes
-    -----
-    The optimizer minimizes the negative of this quantity. The sign
-    conversion occurs once, inside ``optimize_map``.
+    ``model`` may return either a scalar log-likelihood or a per-trial vector.
+    In the latter case the vector is summed internally.
     """
     parameters = np.asarray(parameters, dtype=float).reshape(-1)
     prior_mean = np.asarray(prior_mean, dtype=float).reshape(-1)
     prior_precision = np.asarray(prior_precision, dtype=float)
+    d = parameters.size
 
-    log_likelihood = float(model(parameters, data))
+    log_likelihood, _ = _model_output(model, parameters, data)
+
+    if d == 0:
+        return log_likelihood
+
     diff = parameters - prior_mean
 
     if log_det_precision is None:
-        sign, log_det_precision = np.linalg.slogdet(
-            prior_precision
-        )
+        sign, log_det_precision = np.linalg.slogdet(prior_precision)
         if sign <= 0:
-            raise ValueError(
-                "prior_precision must have positive determinant."
-            )
+            raise ValueError("prior_precision must have positive determinant")
 
-    d = parameters.size
     log_prior = (
         -0.5 * d * np.log(2.0 * np.pi)
         + 0.5 * float(log_det_precision)
@@ -120,50 +178,101 @@ def _make_jax_neg_log_posterior(
     prior_mean: np.ndarray,
     prior_precision: np.ndarray,
     log_det_precision: float,
+    parameter_space: ParameterSpace,
 ) -> Callable:
-    """Create the JAX version of the full negative log posterior."""
+    """Build the JAX full negative log posterior over FREE parameters."""
     try:
         import jax.numpy as jnp
     except ImportError as exc:
         raise ImportError(
-            "A JAX model was requested but JAX is not installed."
+            "hessian_method='autodiff' requires JAX."
         ) from exc
 
-    prior_mean_jax = jnp.asarray(prior_mean)
-    prior_precision_jax = jnp.asarray(prior_precision)
-
+    mean_jax = jnp.asarray(prior_mean)
+    precision_jax = jnp.asarray(prior_precision)
     d = prior_mean.size
+
     prior_constant = (
         -0.5 * d * np.log(2.0 * np.pi)
         + 0.5 * log_det_precision
     )
 
-    def neg_log_post_jax(theta_vec):
-        theta_vec = jnp.asarray(theta_vec)
-        diff = theta_vec - prior_mean_jax
+    def neg_log_post_jax(theta_free):
+        theta_full = parameter_space.expand_jax(theta_free)
+        raw = jnp.asarray(model_jax(theta_full, data))
 
+        # Scalar and trialwise JAX models share one objective.
+        log_likelihood = jnp.sum(raw)
+
+        if d == 0:
+            return -log_likelihood
+
+        diff = theta_free - mean_jax
         log_prior = (
             prior_constant
-            - 0.5 * diff @ prior_precision_jax @ diff
+            - 0.5 * diff @ precision_jax @ diff
         )
-        log_likelihood = model_jax(theta_vec, data)
-
         return -(log_likelihood + log_prior)
 
     return neg_log_post_jax
 
 
+def _fixed_only_result(
+    data,
+    model,
+    parameter_space: ParameterSpace,
+) -> tuple:
+    """Return a valid zero-dimensional MAP when every parameter is fixed."""
+    theta_full = parameter_space.full_mean.copy()
+    log_joint, _ = _model_output(model, theta_full, data)
+
+    result = OptimizationResult(
+        x=np.empty(0, dtype=float),
+        f=-log_joint,
+        hess=np.empty((0, 0), dtype=float),
+        grad=np.empty(0, dtype=float),
+        flag=1.0,
+        success=True,
+        nit=0,
+        n_runs=0,
+        is_hess_pos=True,
+        abs_g=0.0,
+        x_init=np.empty(0, dtype=float),
+        hess_method="fixed",
+        convergence_status=ConvergenceStatus.SKIPPED_NO_TRIAL_FUNC,
+        hess_raw_min_eig=None,
+        hess_n_clipped=0,
+        hess_condition_number=1.0,
+        laplace_valid=True,
+        n_inits_agreeing=0,
+        at_hard_bounds=np.empty(0, dtype=bool),
+        weak_identifiability=None,
+        search_path=None,
+        search_f=None,
+        polish_path=None,
+        polish_f=None,
+        n_polish_steps=0,
+    )
+
+    return (
+        log_joint,
+        theta_full,
+        np.empty((0, 0), dtype=float),
+        np.zeros(parameter_space.d_full, dtype=float),
+        1.0,
+        result,
+    )
+
+
 def optimize_map(
     data: Any,
-    model: Callable[[np.ndarray, Any], float],
+    model: Callable[[np.ndarray, Any], Any],
     config: Config,
     prior_mean: np.ndarray,
     prior_precision: np.ndarray,
     method: str = "LAP",
-    model_trials: Optional[
-        Callable[[np.ndarray, Any], np.ndarray]
-    ] = None,
     model_jax: Optional[Callable] = None,
+    parameter_space: Optional[ParameterSpace] = None,
 ) -> Tuple[
     float,
     np.ndarray,
@@ -172,79 +281,46 @@ def optimize_map(
     float,
     OptimizationResult,
 ]:
-    """Estimate one subject's MAP and observed posterior Hessian.
+    """Estimate one subject's MAP.
 
-    Parameters
-    ----------
-    data
-        Subject data.
-    model
-        NumPy model returning the summed log-likelihood.
-    config
-        Optimization configuration.
-    prior_mean
-        Gaussian-prior mean.
-    prior_precision
-        Gaussian-prior precision.
-    method
-        Only ``"LAP"`` is supported.
-    model_trials
-        Optional NumPy model returning per-trial log-likelihoods.
-        When supplied, it enables the Gauss-Newton MAP polish:
+    The model output determines the optimization path automatically:
 
-            H_opt = J.T @ J + prior_precision.
+    scalar model
+        L-BFGS-B -> observed Hessian
 
-        This curvature is used ONLY for optimization.
-    model_jax
-        Optional JAX implementation of the same summed log-likelihood.
+    trialwise model
+        L-BFGS-B -> GN polish -> observed Hessian
 
-        Required only when:
-
-            config.hessian_method == "autodiff".
-
-        The same Gaussian prior is added internally so AD differentiates
-        the full negative log posterior.
-
-    Returns
-    -------
-    loglik
-        Backward-compatible name for the log joint at the MAP.
-    parameters
-        MAP parameter vector.
-    hessian
-        Observed Hessian of the full negative log posterior at the MAP.
-    grad
-        Gradient of the full negative log posterior at the MAP.
-    flag
-        MAP/curvature quality flag.
-    result
-        Full ``OptimizationResult``.
-
-    Notes
-    -----
-    A non-PD observed Hessian does not erase a valid MAP. In that case
-    ``result.is_hess_pos=False`` and ``result.laplace_valid=False``.
-    Higher-level code must avoid computing Laplace evidence for that fit.
+    The final observed Hessian remains independent of GN in both cases.
     """
     if method != "LAP":
         raise ValueError(
-            f"Method '{method}' is not recognized. "
-            "Only 'LAP' is supported."
+            f"Method '{method}' is not recognized. Only 'LAP' is supported."
         )
 
-    prior_mean, prior_precision, log_det_precision = (
-        _validate_prior(prior_mean, prior_precision)
+    prior_mean, prior_precision, log_det_precision = _validate_prior(
+        prior_mean,
+        prior_precision,
     )
 
-    d = prior_mean.size
-
-    if config.d is not None and config.d != d:
-        raise ValueError(
-            f"config.d={config.d} but prior_mean has length {d}."
+    if parameter_space is None:
+        parameter_space = ParameterSpace.all_free(
+            prior_mean,
+            prior_precision,
         )
 
+    if parameter_space.d_free != prior_mean.size:
+        raise ValueError(
+            "parameter_space.d_free must equal the free prior dimension"
+        )
+
+    if parameter_space.d_free == 0:
+        return _fixed_only_result(data, model, parameter_space)
+
+    reduced_config = parameter_space.reduce_config(config)
+
     hessian_method = str(
-        getattr(config, "hessian_method", "central_fd")
+        getattr(reduced_config, "hessian_method", "central_fd")
     ).lower()
 
     if hessian_method == "autodiff" and model_jax is None:
@@ -252,37 +328,44 @@ def optimize_map(
             "Config.hessian_method='autodiff' requires model_jax."
         )
 
-    optimizer = BFGSOptimizer(d, config=config)
+    # Detect the likelihood interface once at the prior mean.
+    theta_probe = parameter_space.expand(prior_mean)
+    is_trialwise = _detect_trialwise_model(
+        model,
+        theta_probe,
+        data,
+    )
 
-    # NumPy full negative log posterior.
-    def neg_log_post(theta_vec):
+    # Cognitive model wrapper used by the scalar posterior objective.
+    def model_free(theta_free, subject_data):
+        theta_full = parameter_space.expand(theta_free)
+        summed, _ = _model_output(model, theta_full, subject_data)
+        return summed
+
+    def neg_log_post(theta_free):
         return -log_posterior(
-            theta_vec,
-            model,
+            theta_free,
+            model_free,
             data,
             prior_mean,
             prior_precision,
             log_det_precision=log_det_precision,
         )
 
-    # Optional per-trial likelihood for GN optimization only.
+    # GN receives the vector model only when it actually exists.
     trial_func = None
-    if model_trials is not None:
+    if is_trialwise:
+        def trial_func(theta_free):
+            theta_full = parameter_space.expand(theta_free)
+            _, trial = _model_output(model, theta_full, data)
 
-        def trial_func(theta_vec):
-            values = np.asarray(
-                model_trials(theta_vec, data),
-                dtype=float,
-            ).reshape(-1)
-
-            if values.size == 0:
-                raise ValueError(
-                    "model_trials returned an empty array."
+            if trial is None:
+                raise RuntimeError(
+                    "model output changed from trialwise to scalar during "
+                    "optimization; model return shape must be stable."
                 )
+            return trial
 
-            return values
-
-    # Optional JAX full negative log posterior for AD Hessian only.
     neg_log_post_jax = None
     if model_jax is not None:
         neg_log_post_jax = _make_jax_neg_log_posterior(
@@ -291,7 +374,13 @@ def optimize_map(
             prior_mean=prior_mean,
             prior_precision=prior_precision,
             log_det_precision=log_det_precision,
+            parameter_space=parameter_space,
         )
+
+    optimizer = BFGSOptimizer(
+        parameter_space.d_free,
+        config=reduced_config,
+    )
 
     result = optimizer.optimize(
         neg_log_post,
@@ -302,20 +391,25 @@ def optimize_map(
     )
 
     if result.flag == 0:
-        parameters = np.full(d, np.nan)
-        hessian = np.full((d, d), np.nan)
-        grad = np.full(d, np.nan)
-        loglik = np.nan
+        parameters_full = np.full(parameter_space.d_full, np.nan)
+        gradient_full = np.full(parameter_space.d_full, np.nan)
+        hessian = np.full(
+            (parameter_space.d_free, parameter_space.d_free),
+            np.nan,
+        )
+        log_joint = np.nan
 
     else:
-        # Keep the MAP even when the observed Hessian is non-PD.
-        parameters = np.asarray(result.x, dtype=float)
+        parameters_full = parameter_space.expand(result.x)
+        gradient_full = parameter_space.expand_free_vector(
+            result.grad,
+            fixed_value=0.0,
+        )
         hessian = np.asarray(result.hess, dtype=float)
-        grad = np.asarray(result.grad, dtype=float)
 
-        loglik = log_posterior(
+        log_joint = log_posterior(
             result.x,
-            model,
+            model_free,
             data,
             prior_mean,
             prior_precision,
@@ -323,10 +417,10 @@ def optimize_map(
         )
 
     return (
-        loglik,
-        parameters,
+        log_joint,
+        parameters_full,
         hessian,
-        grad,
+        gradient_full,
         result.flag,
         result,
     )
