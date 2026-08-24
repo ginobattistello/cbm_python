@@ -539,13 +539,27 @@ class BFGSOptimizer:
         accepted_steps = 0
 
         for _ in range(n_steps):
-            H_opt = self._gauss_newton_curvature(
-                trial_func, x, prior_precision
-            )
+            # First check whether L-BFGS-B has already reached a point where
+            # there is effectively nothing left for GN to polish. Previously,
+            # g ~ 0 implied g.T @ H^-1 @ g ~ 0 and was incorrectly labelled
+            # as singular curvature.
             g = self._central_gradient(neg_log_post, x)
 
             if trace is not None:
                 trace.append((x.copy(), f_current))
+
+            if not np.all(np.isfinite(g)):
+                status = ConvergenceStatus.SINGULAR_CURVATURE
+                break
+
+            grad_inf = float(np.linalg.norm(g, ord=np.inf))
+            if grad_inf <= self.gtol:
+                status = ConvergenceStatus.CONVERGED_DF
+                break
+
+            H_opt = self._gauss_newton_curvature(
+                trial_func, x, prior_precision
+            )
 
             try:
                 dx = np.linalg.solve(H_opt, g)
@@ -553,8 +567,31 @@ class BFGSOptimizer:
                 status = ConvergenceStatus.SINGULAR_CURVATURE
                 break
 
-            if not np.all(np.isfinite(dx)) or float(g @ dx) <= 0.0:
+            if not np.all(np.isfinite(dx)):
                 status = ConvergenceStatus.SINGULAR_CURVATURE
+                break
+
+            # An effectively zero Newton displacement also means convergence.
+            dx_norm = float(np.linalg.norm(dx))
+            x_scale = 1.0 + float(np.linalg.norm(x))
+            if dx_norm <= 1e-10 * x_scale:
+                status = ConvergenceStatus.CONVERGED_DF
+                break
+
+            # For positive-definite GN curvature, g.T @ dx must be positive.
+            # Tiny round-off around zero is treated as convergence; a
+            # materially negative value remains a genuine curvature failure.
+            directional = float(g @ dx)
+            directional_tol = 1e-12 * max(
+                1.0,
+                float(np.linalg.norm(g)) * dx_norm,
+            )
+
+            if directional <= 0.0:
+                if abs(directional) <= directional_tol:
+                    status = ConvergenceStatus.CONVERGED_DF
+                else:
+                    status = ConvergenceStatus.SINGULAR_CURVATURE
                 break
 
             step = 1.0

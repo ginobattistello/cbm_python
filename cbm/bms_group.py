@@ -519,6 +519,49 @@ def bms_group(L: np.ndarray,
     return result
 
 
+def _print_btw_conds_result(result: "BtwCondsResult") -> None:
+    """Print one compact between-condition summary."""
+    print("Between-condition results")
+    print(f"  P(same model/family): {result.xp:.3f}")
+    print(f"  Protected P(same):    {result.pxp:.3f}")
+    print(f"  Bayes omnibus risk:   {result.bor:.3f}")
+    print(
+        "  Best tuple: "
+        + " -> ".join(str(int(m) + 1) for m in result.best.models)
+    )
+    print(
+        "  Best tuple status: "
+        + ("same" if result.best.is_equal else "different")
+    )
+    print("\nCondition-specific model frequencies")
+    for c, cond in enumerate(result.per_cond, start=1):
+        freq = "  ".join(
+            f"M{k + 1}={value:.3f}"
+            for k, value in enumerate(cond.model_frequency)
+        )
+        print(f"  Condition {c}: {freq}")
+    print("-" * 70)
+    print("done :]")
+
+
+def _print_btw_groups_result(result: "BtwGroupsResult") -> None:
+    """Print one compact between-group summary."""
+    print("Between-group results")
+    print(f"  P(equal model-frequency profile): {result.p_equal:.3f}")
+    print(f"  Equality rejected (p < 0.05): {result.h_reject_equality}")
+    print(f"  Pooled free energy:   {result.F_equal:.3f}")
+    print(f"  Separate free energy: {result.F_diff:.3f}")
+    print("\nGroup-specific model frequencies")
+    for g, grp in enumerate(result.per_group, start=1):
+        freq = "  ".join(
+            f"M{k + 1}={value:.3f}"
+            for k, value in enumerate(grp.model_frequency)
+        )
+        print(f"  Group {g}: {freq}")
+    print("-" * 70)
+    print("done :]")
+
+
 def _tuple_machinery(n_mod: int, n_slots: int, cfam: np.ndarray):
     """Enumerate all model tuples over slots and split them into
     'equal' (same family in every slot) vs 'not equal'. Shared by the
@@ -560,7 +603,8 @@ def _best_tuple(btw: GroupBMSResult, tuples, is_eq, cfam, names) -> BestTuple:
 def bms_group_btw_conds(L: np.ndarray,
                         families: Optional[Sequence[Sequence[int]]] = None,
                         family_names: Optional[Sequence[str]] = None,
-                        n_samples: int = 1_000_000) -> BtwCondsResult:
+                        n_samples: int = 1_000_000,
+                        verbose: bool = True) -> BtwCondsResult:
     """
     Between-conditions BMS (≈ VBA_groupBMC_btwConds): do the SAME
     subjects use the same model (or family) across conditions?
@@ -591,14 +635,26 @@ def bms_group_btw_conds(L: np.ndarray,
     # Tuple log-evidence: sum across conditions (within-subject).
     Lt = sum(L[:, tuples[:, c], c] for c in range(n_cond))
 
-    btw = bms_group(Lt, families=[eq_idx, neq_idx],
-                    family_names=["equal", "not_equal"],
-                    n_samples=n_samples)
-    per_cond = [bms_group(L[:, :, c], families=families,
-                          family_names=family_names, n_samples=n_samples)
-                for c in range(n_cond)]
+    # Internal BMS fits are implementation details: keep them quiet.
+    btw = bms_group(
+        Lt,
+        families=[eq_idx, neq_idx],
+        family_names=["equal", "not_equal"],
+        n_samples=n_samples,
+        verbose=False,
+    )
+    per_cond = [
+        bms_group(
+            L[:, :, c],
+            families=families,
+            family_names=family_names,
+            n_samples=n_samples,
+            verbose=False,
+        )
+        for c in range(n_cond)
+    ]
 
-    return BtwCondsResult(
+    result = BtwCondsResult(
         xp=float(btw.families.exceedance_prob[0]),
         pxp=float(btw.families.protected_exceedance_prob[0]),
         bor=btw.families.bor,
@@ -611,11 +667,17 @@ def bms_group_btw_conds(L: np.ndarray,
         per_cond=per_cond,
     )
 
+    if verbose:
+        _print_btw_conds_result(result)
+
+    return result
+
 
 def bms_group_btw_groups(Ls: Sequence[np.ndarray],
                          families: Optional[Sequence[Sequence[int]]] = None,
                          family_names: Optional[Sequence[str]] = None,
-                         n_samples: int = 1_000_000) -> BtwGroupsResult:
+                         n_samples: int = 1_000_000,
+                         verbose: bool = True) -> BtwGroupsResult:
     """
     Between-groups BMS (= VBA_groupBMC_btwGroups): do DIFFERENT groups
     of subjects have the same model frequencies?
@@ -646,18 +708,32 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
         raise ValueError("between-groups BMS needs >= 2 models")
 
     # H0: one frequency vector for all subjects (pooled fit)
-    pooled = bms_group(np.vstack(Ls), families=families,
-                       family_names=family_names, n_samples=n_samples)
+    # Internal pooled/group fits are implementation details: keep them quiet.
+    pooled = bms_group(
+        np.vstack(Ls),
+        families=families,
+        family_names=family_names,
+        n_samples=n_samples,
+        verbose=False,
+    )
+
     # H1: each group gets its own frequency vector (separate fits)
-    per_group = [bms_group(Lg, families=families,
-                           family_names=family_names, n_samples=n_samples)
-                 for Lg in Ls]
+    per_group = [
+        bms_group(
+            Lg,
+            families=families,
+            family_names=family_names,
+            n_samples=n_samples,
+            verbose=False,
+        )
+        for Lg in Ls
+    ]
 
     F_equal = float(pooled.F)
     F_diff = float(sum(r.F for r in per_group))
     p_equal = float(1.0 / (1.0 + np.exp(np.clip(F_diff - F_equal, -700, 700))))
 
-    return BtwGroupsResult(
+    result = BtwGroupsResult(
         p_equal=p_equal,
         h_reject_equality=bool(p_equal < 0.05),
         F_equal=F_equal,
@@ -667,6 +743,11 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
         pooled=pooled,
         per_group=per_group,
     )
+
+    if verbose:
+        _print_btw_groups_result(result)
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════
