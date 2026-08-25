@@ -1,16 +1,8 @@
 """Unified individual-fit example.
 
-The same public API handles:
-1. binary choice data,
-2. categorical choice data,
-3. continuous outcomes,
-4. legacy/scalar likelihood functions.
-
-Key model rule
---------------
-model(theta, data) may return either:
-- a scalar summed log-likelihood -> L-BFGS-B only
-- a vector of per-trial log-likelihoods -> L-BFGS-B + automatic GN polish
+The same API handles binary, categorical, continuous, and scalar likelihoods.
+Dynamic models may additionally provide ``evolution=`` to expose deterministic
+trialwise latent variables at the final MAP.
 """
 
 import numpy as np
@@ -21,8 +13,10 @@ from cbm.optimization import Config
 from models import (
     binary_model,
     binary_observation,
+    binary_evolution,
     categorical_model,
     categorical_observation,
+    categorical_evolution,
     continuous_model,
     continuous_model_scalar,
     continuous_observation,
@@ -46,7 +40,7 @@ config = Config(
 
 
 # =====================================================================
-# 1. Binary choice: trialwise likelihood -> GN available
+# 1. Binary RL model: prediction + latent trajectories
 # =====================================================================
 
 binary_data = [
@@ -58,6 +52,7 @@ binary_fit = individual_fit(
     data=binary_data,
     model=binary_model,
     observation=binary_observation,
+    evolution=binary_evolution,
     prior_mean=np.array([0.5, 2.0]),
     prior_variance=np.array([1.0, 16.0]),
     config=config,
@@ -69,80 +64,67 @@ print(binary_fit.output.parameters)
 print("\nBinary log model evidence")
 print(binary_fit.output.log_evidence)
 
+print("\nFirst subject latent variables")
+print(binary_fit.output.latent[0].keys())
+
 binary_fit.plot(subject=0)
 
-# =====================================================================
-# 2. Categorical choice: trialwise likelihood -> GN available
-# =====================================================================
+# # =====================================================================
+# # 2. Categorical RL model: prediction + latent trajectories
+# # =====================================================================
 
-categorical_data = [
-    categorical_subject(rng)
-    for _ in range(5)
-]
+# categorical_data = [
+#     categorical_subject(rng)
+#     for _ in range(5)
+# ]
 
-categorical_fit = individual_fit(
-    data=categorical_data,
-    model=categorical_model,
-    observation=categorical_observation,
-    prior_mean=np.array([0.5, 2.0]),
-    prior_variance=np.array([1.0, 16.0]),
-    config=config,
-)
+# categorical_fit = individual_fit(
+#     data=categorical_data,
+#     model=categorical_model,
+#     observation=categorical_observation,
+#     evolution=categorical_evolution,
+#     prior_mean=np.array([0.5, 2.0]),
+#     prior_variance=np.array([1.0, 16.0]),
+#     config=config,
+# )
 
-print("\nCategorical MAP parameters")
-print(categorical_fit.output.parameters)
 
-print("\nCategorical log model evidence")
-print(categorical_fit.output.log_evidence)
+# # =====================================================================
+# # 3. Continuous model: no latent dynamics
+# # =====================================================================
 
-categorical_fit.plot(subject=0)
+# continuous_data = [
+#     continuous_subject(rng)
+#     for _ in range(5)
+# ]
 
-# =====================================================================
-# 3. Continuous output: trialwise likelihood -> GN available
-# =====================================================================
+# continuous_fit = individual_fit(
+#     data=continuous_data,
+#     model=continuous_model,
+#     observation=continuous_observation,
+#     prior_mean=np.array([0.0, 0.0]),
+#     prior_variance=np.array([10.0, 10.0]),
+#     config=config,
+# )
 
-continuous_data = [
-    continuous_subject(rng)
-    for _ in range(5)
-]
 
-continuous_fit = individual_fit(
-    data=continuous_data,
-    model=continuous_model,
-    observation=continuous_observation,
-    prior_mean=np.array([0.0, 0.0]),
-    prior_variance=np.array([10.0, 10.0]),
-    config=config,
-)
+# # =====================================================================
+# # 4. Scalar likelihood: GN unavailable, latent tracking still optional
+# # =====================================================================
 
-print("\nContinuous MAP parameters")
-print(continuous_fit.output.parameters)
+# scalar_config = Config(
+#     d=2,
+#     num_init=5,
+#     verbose=True,
+#     display=False,
+#     hessian_method="central_fd",
+# )
 
-print("\nContinuous log model evidence")
-print(continuous_fit.output.log_evidence)
-
-continuous_fit.plot(subject=0)
-
-# =====================================================================
-# 4. Scalar likelihood: fully supported, GN simply unavailable
-# =====================================================================
-
-scalar_config = Config(
-    d=2,
-    num_init=5,
-    verbose=True,
-    display=False,
-    hessian_method="central_fd",
-)
-
-scalar_fit = individual_fit(
-    data=continuous_data,
-    model=continuous_model_scalar,
-    observation=continuous_observation,
-    prior_mean=np.array([0.0, 0.0]),
-    prior_variance=np.array([10.0, 10.0]),
-    config=scalar_config,
-)
-
-print("\nScalar model diagnostics")
-print(scalar_fit.math.diagnostics[0])
+# scalar_fit = individual_fit(
+#     data=continuous_data,
+#     model=continuous_model_scalar,
+#     observation=continuous_observation,
+#     prior_mean=np.array([0.0, 0.0]),
+#     prior_variance=np.array([10.0, 10.0]),
+#     config=scalar_config,
+# )

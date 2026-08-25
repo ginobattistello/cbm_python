@@ -282,6 +282,11 @@ class FitOutput:
     parameters: np.ndarray
     log_evidence: np.ndarray
 
+    # One optional dictionary per subject. Values are deterministic model
+    # trajectories evaluated ONCE at the final MAP. They are not optimization
+    # traces and do not enter MAP estimation or Laplace evidence.
+    latent: Optional[List[Optional[dict]]] = None
+
 
 @dataclass
 class FitResult:
@@ -349,6 +354,77 @@ class FitResult:
             )
 
 
+
+# ---------------------------------------------------------------------
+# Optional latent-state tracking
+# ---------------------------------------------------------------------
+
+def _validate_evolution_output(
+    latent,
+    subject_data,
+    *,
+    subject_index: int,
+) -> dict:
+    """Validate an evolution() result without imposing a model-specific schema.
+
+    ``evolution(theta, data)`` must return a dictionary. Numeric scalars and
+    arrays are allowed. Trialwise arrays conventionally have first dimension T,
+    but non-trialwise quantities are also retained and simply omitted from the
+    automatic trajectory plot.
+    """
+    if not isinstance(latent, dict):
+        raise TypeError(
+            "evolution(theta, data) must return a dictionary; "
+            f"subject {subject_index + 1} returned "
+            f"{type(latent).__name__}."
+        )
+
+    clean = {}
+    for name, value in latent.items():
+        if not isinstance(name, str):
+            raise TypeError(
+                "evolution() dictionary keys must be strings; "
+                f"got key {name!r}."
+            )
+
+        try:
+            arr = np.asarray(value, dtype=float)
+        except Exception as exc:
+            raise TypeError(
+                f"latent variable {name!r} for subject "
+                f"{subject_index + 1} is not numeric."
+            ) from exc
+
+        if arr.size == 0:
+            raise ValueError(
+                f"latent variable {name!r} for subject "
+                f"{subject_index + 1} is empty."
+            )
+
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(
+                f"latent variable {name!r} for subject "
+                f"{subject_index + 1} contains non-finite values."
+            )
+
+        clean[name] = arr.copy()
+
+    return clean
+
+
+def _probe_evolution(evolution, theta0, data):
+    """Validate the optional evolution function once before fitting."""
+    if evolution is None:
+        return ()
+
+    latent = _validate_evolution_output(
+        evolution(theta0, data[0]),
+        data[0],
+        subject_index=0,
+    )
+    return tuple(latent.keys())
+
+
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
@@ -390,6 +466,9 @@ def individual_fit(
     model_jax: Optional[Callable] = None,
     observation: Optional[
         Callable[[np.ndarray, Any], np.ndarray]
+    ] = None,
+    evolution: Optional[
+        Callable[[np.ndarray, Any], dict]
     ] = None,
 ) -> FitResult:
     """Fit a computational model independently to multiple subjects.
@@ -445,6 +524,16 @@ def individual_fit(
         ``display.py`` reads ``y`` directly and calls ``observation`` with
         the fitted full parameter vector and the complete subject data.
 
+    evolution
+        Optional deterministic latent-state function:
+
+            evolution(theta, subject_data) -> dict[str, array-like]
+
+        It is evaluated once per subject at the FINAL MAP after optimization.
+        Returned trajectories are stored in ``fit.output.latent`` and may be
+        displayed trial-by-trial. ``evolution`` never enters the optimization,
+        observed-Hessian, or evidence calculations.
+
     Returns
     -------
     FitResult
@@ -494,6 +583,11 @@ def individual_fit(
     )
     model_is_trialwise = probe.ndim == 1
 
+    latent_names = _probe_evolution(
+        evolution,
+        prior.mean.flatten(),
+        data,
+    )
 
     if getattr(config, "display", False) and observation is None:
         warnings.warn(
@@ -527,6 +621,10 @@ def individual_fit(
             "Observed Hessian: "
             f"{getattr(config, 'hessian_method', 'central_fd')}"
         )
+        print(
+            "Latent tracking: "
+            + (", ".join(latent_names) if latent_names else "none")
+        )
         print("-" * 70)
 
     flags = np.full(n_subjects, np.nan)
@@ -540,6 +638,8 @@ def individual_fit(
     diagnostics_list: List[
         Optional[PostFitDiagnostics]
     ] = []
+
+    latent_list: List[Optional[dict]] = []
 
     gradients = np.full((d, n_subjects), np.nan)
 
@@ -671,6 +771,31 @@ def individual_fit(
             )
 
         # ---------------------------------------------------------
+        # Deterministic latent trajectories at the FINAL MAP.
+        #
+        # This is deliberately post-fit. The evolution function is never
+        # called by optimization.py or map_estimation.py, so adding latent
+        # tracking cannot change theta_MAP or evidence.
+        # ---------------------------------------------------------
+        latent_n = None
+        if evolution is not None:
+            try:
+                latent_n = _validate_evolution_output(
+                    evolution(parameters_n, subject_data),
+                    subject_data,
+                    subject_index=n,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"Subject {n + 1:02d}: latent tracking failed at the "
+                    f"final MAP ({type(exc).__name__}: {exc}). "
+                    "The fit is retained and latent output is set to None."
+                )
+                latent_n = None
+
+        latent_list.append(latent_n)
+
+        # ---------------------------------------------------------
         # Store MAP-level outputs.
         # ---------------------------------------------------------
         flags[n] = flag_n
@@ -794,6 +919,7 @@ def individual_fit(
     output = FitOutput(
         parameters=np.vstack(parameters_list),
         log_evidence=lme,
+        latent=latent_list,
     )
 
     fit = FitResult(
@@ -808,6 +934,8 @@ def individual_fit(
         fit._display_data = {
             "data": data,
             "observation": observation,
+            "evolution": evolution,
+            "latent_names": latent_names,
             "free_mask": prior.free_mask.copy(),
             "fixed_mask": prior.fixed_mask.copy(),
         }

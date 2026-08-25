@@ -1,17 +1,12 @@
 """Minimal model definitions for the unified CBM API.
 
-Every model accepts the same standardized subject data:
+Dynamic RL models expose an optional ``evolution(theta, data)`` function.
+It returns deterministic trialwise latent variables. CBM evaluates this
+function once at the final MAP for latent tracking.
 
-    data = {
-        "y": observed outcomes,
-        "X": model inputs,
-    }
-
-A model may return:
-- a scalar summed log-likelihood, or
-- a vector of per-trial log-likelihoods.
-
-Returning a vector automatically enables the GN polish.
+The likelihood API itself is unchanged:
+- scalar return -> L-BFGS-B only;
+- per-trial vector -> L-BFGS-B + automatic GN polish.
 """
 
 import numpy as np
@@ -27,28 +22,54 @@ def _softmax(x):
 # Binary Rescorla-Wagner + softmax
 # ---------------------------------------------------------------------
 
-def binary_observation(theta, data):
-    """Return P(choice=1) on every trial."""
-    alpha, beta = theta
+def binary_evolution(theta, data):
+    """Trialwise RW latent states evaluated before each observed choice."""
+    alpha, _ = theta
+
     y = np.asarray(data["y"], dtype=int)
     rewards = np.asarray(data["X"]["reward"], dtype=float)
 
     q = np.zeros(2)
-    p1 = np.zeros(len(y))
+    q_history = np.zeros((len(y), 2))
+    prediction_error = np.zeros(len(y))
 
     for t, (choice, reward) in enumerate(zip(y, rewards)):
-        p = _softmax(beta * q)
-        p1[t] = p[1]
-        q[choice] += alpha * (reward - q[choice])
+        q_history[t] = q
+
+        pe = reward - q[choice]
+        prediction_error[t] = pe
+
+        q[choice] += alpha * pe
+
+    return {
+        "Q": q_history,
+        "prediction_error": prediction_error,
+    }
+
+
+def binary_observation(theta, data, latent=None):
+    """Return P(choice=1) on every trial."""
+    _, beta = theta
+
+    if latent is None:
+        latent = binary_evolution(theta, data)
+
+    q = np.asarray(latent["Q"], dtype=float)
+    p1 = np.zeros(q.shape[0])
+
+    for t in range(q.shape[0]):
+        p1[t] = _softmax(beta * q[t])[1]
 
     return p1
 
 
 def binary_model(theta, data):
-    """Per-trial binary log-likelihood; GN is therefore available."""
+    """Per-trial binary log-likelihood."""
     y = np.asarray(data["y"], dtype=int)
+
+    latent = binary_evolution(theta, data)
     p1 = np.clip(
-        binary_observation(theta, data),
+        binary_observation(theta, data, latent=latent),
         1e-12,
         1.0 - 1e-12,
     )
@@ -63,20 +84,44 @@ def binary_model(theta, data):
 # Categorical Rescorla-Wagner + softmax
 # ---------------------------------------------------------------------
 
-def categorical_observation(theta, data):
-    """Return T x K choice-probability matrix."""
-    alpha, beta = theta
+def categorical_evolution(theta, data):
+    """Trialwise categorical RW values and prediction errors."""
+    alpha, _ = theta
+
     y = np.asarray(data["y"], dtype=int)
     rewards = np.asarray(data["X"]["reward"], dtype=float)
     n_options = int(data["X"]["n_options"])
 
     q = np.zeros(n_options)
-    probs = np.zeros((len(y), n_options))
+    q_history = np.zeros((len(y), n_options))
+    prediction_error = np.zeros(len(y))
 
     for t, (choice, reward) in enumerate(zip(y, rewards)):
-        p = _softmax(beta * q)
-        probs[t] = p
-        q[choice] += alpha * (reward - q[choice])
+        q_history[t] = q
+
+        pe = reward - q[choice]
+        prediction_error[t] = pe
+
+        q[choice] += alpha * pe
+
+    return {
+        "Q": q_history,
+        "prediction_error": prediction_error,
+    }
+
+
+def categorical_observation(theta, data, latent=None):
+    """Return T x K choice-probability matrix."""
+    _, beta = theta
+
+    if latent is None:
+        latent = categorical_evolution(theta, data)
+
+    q = np.asarray(latent["Q"], dtype=float)
+    probs = np.zeros_like(q)
+
+    for t in range(q.shape[0]):
+        probs[t] = _softmax(beta * q[t])
 
     return probs
 
@@ -84,12 +129,17 @@ def categorical_observation(theta, data):
 def categorical_model(theta, data):
     """Per-trial categorical log-likelihood."""
     y = np.asarray(data["y"], dtype=int)
+
+    latent = categorical_evolution(theta, data)
     probs = np.clip(
-        categorical_observation(theta, data),
+        categorical_observation(theta, data, latent=latent),
         1e-12,
         1.0,
     )
-    return np.log(probs[np.arange(len(y)), y])
+
+    return np.log(
+        probs[np.arange(len(y)), y]
+    )
 
 
 # ---------------------------------------------------------------------
@@ -115,10 +165,6 @@ def continuous_model(theta, data):
     )
 
 
-# ---------------------------------------------------------------------
-# Scalar example
-# ---------------------------------------------------------------------
-
 def continuous_model_scalar(theta, data):
-    """Same model, but summed manually: GN is unavailable."""
+    """Same continuous model summed manually: GN is unavailable."""
     return float(np.sum(continuous_model(theta, data)))

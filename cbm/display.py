@@ -139,8 +139,9 @@ def _panel(
     subtitle=None,
     dx=-0.13,
     dy=1.03,
+    reserve_subtitle=False,
 ):
-    """Add a panel label, title and optional fit-quality subtitle."""
+    """Add a panel label, title and optional subtitle."""
     ax.text(
         dx,
         dy,
@@ -153,8 +154,10 @@ def _panel(
     )
 
     if title:
-        # Reserve a little more vertical space when a subtitle is present.
-        ax.set_title(title, pad=14 if subtitle else 5)
+        ax.set_title(
+            title,
+            pad=14 if (subtitle or reserve_subtitle) else 5,
+        )
 
     if subtitle:
         ax.text(
@@ -166,6 +169,51 @@ def _panel(
             va="bottom",
             fontsize=6.4,
             color=_GREY,
+        )
+
+
+def _trace_key_subtitle(ax, entries, y=1.015):
+    """Draw line/style identifiers in the subtitle position.
+
+    This is deliberately not a matplotlib legend: the line samples and labels
+    are drawn outside the data area, directly beneath the panel title.
+    """
+    entries = list(entries)
+    if not entries:
+        return
+
+    n = len(entries)
+    cell = 1.0 / n
+
+    for i, entry in enumerate(entries):
+        center = (i + 0.5) * cell
+
+        seg_half = min(0.045, 0.18 * cell)
+        seg_center = center - min(0.055, 0.18 * cell)
+
+        ax.plot(
+            [seg_center - seg_half, seg_center + seg_half],
+            [y, y],
+            transform=ax.transAxes,
+            color=entry.get("color", _INK),
+            linestyle=entry.get("linestyle", "-"),
+            lw=1.15,
+            marker=entry.get("marker", None),
+            markersize=2.8,
+            markevery=[1],
+            clip_on=False,
+        )
+
+        ax.text(
+            seg_center + seg_half + 0.010,
+            y,
+            entry["label"],
+            transform=ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=6.4,
+            color=_GREY,
+            clip_on=False,
         )
 
 
@@ -300,23 +348,63 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
     B  parameter trajectories over the search, with the final +/-1 SE band
     C  objective evolution: log-joint during L-BFGS-B and GN polish
     D  parameter estimates with 95% intervals
-    E  status, flags and warnings — full width across the bottom
+    E  optional trialwise latent trajectories at the final MAP
+    F  status, flags and warnings — full width across the bottom
     """
     plt = _mpl()
     dd = _require_display(result)
     from .reporting import standard_errors
 
     with plt.rc_context(_style(plt)):
-        fig = plt.figure(figsize=figsize)
-        gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.02],
-                              hspace=0.62, wspace=0.28,
-                              top=0.90, bottom=0.05,
-                              left=0.09, right=0.97)
-        axA = fig.add_subplot(gs[0, 0])
-        axB = fig.add_subplot(gs[0, 1])
-        axC = fig.add_subplot(gs[1, 0])
-        axD = fig.add_subplot(gs[1, 1])
-        axE = fig.add_subplot(gs[2, :])
+        latent_all = getattr(result.output, "latent", None)
+        latent_i = (
+            latent_all[subject]
+            if latent_all is not None and subject < len(latent_all)
+            else None
+        )
+        has_latent = isinstance(latent_i, dict) and bool(latent_i)
+
+        # Latent trajectories get their own full-width row. Fits without an
+        # evolution function preserve the established compact 3-row layout.
+        fig_height = 8.8 if has_latent else figsize[1]
+        fig = plt.figure(figsize=(figsize[0], fig_height))
+
+        if has_latent:
+            gs = fig.add_gridspec(
+                4,
+                2,
+                height_ratios=[1.0, 1.0, 0.86, 1.02],
+                hspace=0.72,
+                wspace=0.28,
+                top=0.91,
+                bottom=0.045,
+                left=0.09,
+                right=0.97,
+            )
+            axA = fig.add_subplot(gs[0, 0])
+            axB = fig.add_subplot(gs[0, 1])
+            axC = fig.add_subplot(gs[1, 0])
+            axD = fig.add_subplot(gs[1, 1])
+            axLatent = fig.add_subplot(gs[2, :])
+            axStatus = fig.add_subplot(gs[3, :])
+        else:
+            gs = fig.add_gridspec(
+                3,
+                2,
+                height_ratios=[1.0, 1.0, 1.02],
+                hspace=0.62,
+                wspace=0.28,
+                top=0.90,
+                bottom=0.05,
+                left=0.09,
+                right=0.97,
+            )
+            axA = fig.add_subplot(gs[0, 0])
+            axB = fig.add_subplot(gs[0, 1])
+            axC = fig.add_subplot(gs[1, 0])
+            axD = fig.add_subplot(gs[1, 1])
+            axLatent = None
+            axStatus = fig.add_subplot(gs[2, :])
 
         theta = np.atleast_2d(np.asarray(result.output.parameters,
                                          dtype=float))[subject]
@@ -578,41 +666,54 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             x = np.arange(sp.shape[0])
             n_tr = min(d, sp.shape[1])
             shades = _grey_ramp(n_tr)
+            parameter_key = []
+
             for j in range(n_tr):
-                axB.plot(x, sp[:, j], lw=1.0, color=shades[j], alpha=0.95,
-                         linestyle=_LINE_STYLES[j % len(_LINE_STYLES)],
-                         label=f"$\\theta_{{{j}}}$")
+                linestyle = _LINE_STYLES[j % len(_LINE_STYLES)]
+
+                axB.plot(
+                    x,
+                    sp[:, j],
+                    lw=1.0,
+                    color=shades[j],
+                    alpha=0.95,
+                    linestyle=linestyle,
+                )
+
+                parameter_key.append({
+                    "label": f"$\\theta_{{{j}}}$",
+                    "color": shades[j],
+                    "linestyle": linestyle,
+                })
+
                 if np.isfinite(se[j]):
-                    axB.axhspan(theta[j] - se[j], theta[j] + se[j],
-                                color=shades[j], alpha=0.15, lw=0)
+                    axB.axhspan(
+                        theta[j] - se[j],
+                        theta[j] + se[j],
+                        color=shades[j],
+                        alpha=0.15,
+                        lw=0,
+                    )
+
             axB.set_xlabel("function evaluations")
             axB.set_ylabel(r"$\theta$")
-            # Pinned upper-right rather than "best": with many traces
-            # matplotlib's "best" lands on top of either the clip note
-            # (bottom-right) or the title. One row per two entries keeps
-            # it compact.
-            axB.legend(loc="upper right", ncol=max(1, (d + 1) // 2),
-                       fontsize=6.4, columnspacing=1.0,
-                       handlelength=1.7, labelspacing=0.3,
-                       borderaxespad=0.3)
             axB.grid(alpha=0.6)
-            # Early line-search probes can shoot far out (L-BFGS-B tests
-            # wide steps). Left unclipped, one -9.5 excursion flattens the
-            # region where the fit actually converges. Clip to a robust
-            # range and mark that it is clipped rather than hide it.
-            allv = sp[:, :d][np.isfinite(sp[:, :d])]
-            if allv.size:
-                lo_q, hi_q = np.percentile(allv, [2, 98])
-                pad = 0.20 * (hi_q - lo_q or 1.0)
-                lo_c, hi_c = lo_q - pad, hi_q + pad
-                if allv.min() < lo_c or allv.max() > hi_c:
-                    # Extra headroom at the top for the legend.
-                    axB.set_ylim(lo_c, hi_c + 0.28 * (hi_c - lo_c))
-                    axB.text(0.98, 0.03,
-                             "y clipped to 2-98% of the path",
-                             transform=axB.transAxes, ha="right",
-                             va="bottom", fontsize=5.8, color=_GREY)
-            _panel(axB, "B", "parameter path")
+
+            # Deliberately no manual y-limits or percentile clipping:
+            # the entire retained optimization trajectory is visible.
+            axB.relim()
+            axB.autoscale_view(scalex=True, scaley=True)
+
+            _panel(
+                axB,
+                "B",
+                "parameter path",
+                reserve_subtitle=True,
+            )
+            _trace_key_subtitle(
+                axB,
+                parameter_key,
+            )
         else:
             axB.text(0.5, 0.5, "no trajectory retained", ha="center",
                      va="center", transform=axB.transAxes, fontsize=7.5,
@@ -652,7 +753,6 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                     lw=1.25,
                     color=_INK_DARK,
                     linestyle="-",
-                    label="L-BFGS-B",
                 )
 
                 last_x = int(x_lbfgs[-1])
@@ -679,7 +779,6 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
                     linestyle="--",
                     marker="o",
                     markersize=3.0,
-                    label="GN polish",
                 )
 
                 # Visually mark the transition between optimization phases.
@@ -698,15 +797,34 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
             axC.set_xlabel("optimization step")
             axC.set_ylabel("log-joint")
             axC.grid(alpha=0.6)
-            axC.legend(
-                loc="lower right",
-                fontsize=6.4,
-            )
             axC.xaxis.get_major_locator().set_params(integer=True)
+
+            optimization_key = []
+
+            if sf is not None and len(sf):
+                optimization_key.append({
+                    "label": "L-BFGS-B",
+                    "color": _INK_DARK,
+                    "linestyle": "-",
+                })
+
+            if pf is not None and len(pf):
+                optimization_key.append({
+                    "label": "GN polish",
+                    "color": _INK,
+                    "linestyle": "--",
+                    "marker": "o",
+                })
+
             _panel(
                 axC,
                 "C",
                 "log-joint during optimization",
+                reserve_subtitle=True,
+            )
+            _trace_key_subtitle(
+                axC,
+                optimization_key,
             )
         else:
             axC.text(
@@ -743,7 +861,99 @@ def plot_subject(result, subject: int = 0, figsize=(9.0, 7.2),
         x0, x1 = axD.get_xlim()
         axD.set_xlim(x0 - 0.06 * (x1 - x0), x1 + 0.06 * (x1 - x0))
 
-        # ---- E: status, flags, warnings (full width) --------------------
+        # ---- E: latent trajectories at the final MAP --------------------
+        if axLatent is not None:
+            y_obs = np.asarray(data_i["y"])
+            T = y_obs.shape[0] if y_obs.ndim else None
+            traces = []
+
+            for name, value in latent_i.items():
+                arr = np.asarray(value, dtype=float)
+
+                # Automatic plotting is intentionally limited to trialwise
+                # scalars/vectors. Static latent summaries remain available
+                # programmatically in fit.output.latent.
+                if T is None or arr.ndim == 0 or arr.shape[0] != T:
+                    continue
+
+                if arr.ndim == 1:
+                    traces.append((name, arr))
+                else:
+                    flat = arr.reshape(T, -1)
+                    for j in range(flat.shape[1]):
+                        traces.append((f"{name}[{j}]", flat[:, j]))
+
+            max_traces = 6
+            shown = traces[:max_traces]
+            shades = _grey_ramp(max(len(shown), 1))
+            trial = np.arange(1, T + 1) if T is not None else None
+
+            if shown:
+                latent_key = []
+
+                for j, (name, values) in enumerate(shown):
+                    linestyle = _LINE_STYLES[
+                        j % len(_LINE_STYLES)
+                    ]
+
+                    axLatent.plot(
+                        trial,
+                        values,
+                        lw=1.0,
+                        color=shades[j],
+                        linestyle=linestyle,
+                    )
+
+                    latent_key.append({
+                        "label": name,
+                        "color": shades[j],
+                        "linestyle": linestyle,
+                    })
+
+                axLatent.set_xlabel("trial")
+                axLatent.set_ylabel("latent value")
+                axLatent.grid(alpha=0.6)
+
+                # No manual y-limits: display complete trialwise trajectories.
+                axLatent.relim()
+                axLatent.autoscale_view(scalex=True, scaley=True)
+
+                if len(traces) > max_traces:
+                    latent_key.append({
+                        "label": f"+{len(traces) - max_traces} more",
+                        "color": _GREY,
+                        "linestyle": ":",
+                    })
+
+                _panel(
+                    axLatent,
+                    "E",
+                    "latent trajectories at MAP",
+                    reserve_subtitle=True,
+                )
+                _trace_key_subtitle(
+                    axLatent,
+                    latent_key,
+                )
+            else:
+                axLatent.text(
+                    0.5,
+                    0.5,
+                    "latent output contains no trialwise arrays",
+                    ha="center",
+                    va="center",
+                    transform=axLatent.transAxes,
+                    fontsize=7.5,
+                    color=_GREY,
+                )
+                _panel(
+                    axLatent,
+                    "E",
+                    "latent trajectories at MAP",
+                )
+
+        # ---- status, flags, warnings (full width) ------------------------
+        axE = axStatus
         axE.axis("off")
         lines = _flag_lines(result, subject)
         wmsgs = _real_warnings(diag)
