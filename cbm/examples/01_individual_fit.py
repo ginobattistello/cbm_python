@@ -58,15 +58,6 @@ binary_fit = individual_fit(
     config=config,
 )
 
-print("\nBinary MAP parameters")
-print(binary_fit.output.parameters)
-
-print("\nBinary log model evidence")
-print(binary_fit.output.log_evidence)
-
-print("\nFirst subject latent variables")
-print(binary_fit.output.latent[0].keys())
-
 binary_fit.plot(subject=0)
 
 # =====================================================================
@@ -88,6 +79,7 @@ categorical_fit = individual_fit(
     config=config,
 )
 
+categorical_fit.plot(subject=0)
 
 # =====================================================================
 # 3. Continuous model: no latent dynamics
@@ -107,6 +99,7 @@ continuous_fit = individual_fit(
     config=config,
 )
 
+continuous_fit.plot(subject=0)
 
 # =====================================================================
 # 4. Scalar likelihood: GN unavailable, latent tracking still optional
@@ -116,7 +109,7 @@ scalar_config = Config(
     d=2,
     num_init=5,
     verbose=True,
-    display=False,
+    display=True,
     hessian_method="central_fd",
 )
 
@@ -128,3 +121,5 @@ scalar_fit = individual_fit(
     prior_variance=np.array([10.0, 10.0]),
     config=scalar_config,
 )
+
+scalar_fit.plot(subject=0)

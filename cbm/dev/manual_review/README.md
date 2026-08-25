@@ -1,95 +1,84 @@
-# Manual review before upstream PR
+# Exhaustive manual review
 
-This folder is intended to make the fork reviewable by a maintainer.
+This comparison uses the **original CBM repository as the baseline**.
 
-## Recommended setup
+It reports:
 
-Keep two local clones next to each other:
+1. every tracked file that is **new in the fork**;
+2. every tracked file from original CBM that is **deleted in the fork**;
+3. **all shared files**, including unchanged files;
+4. for every modified shared file:
+   - original line range;
+   - proposed fork line range;
+   - diff hunk context;
+   - affected top-level Python functions/classes/methods when detectable;
+   - the complete unified diff.
+
+## Local layout
+
+Recommended:
 
 ```text
-workspace/
-├── cbm_python/             # your fork
-└── cbm_python_original/    # payampiray/cbm_python
+Documents/
+├── cbm_python/              # your fork
+└── cbm_python_original/     # payampiray/cbm_python
 ```
 
-In the original clone:
+Make sure both are up to date:
 
 ```bash
-git remote -v
+cd ../cbm_python_original
+git pull
+
+cd ../cbm_python
 git pull
 ```
 
-In the fork clone:
+## Run
+
+From the **fork repository root**:
 
 ```bash
-git remote -v
-git pull
+bash cbm/dev/manual_review/review_all.sh ../cbm_python_original
 ```
 
-Then, from the fork repository root:
-
-```bash
-python dev/manual_review/pre_pr_checks.py
-
-bash dev/manual_review/review_core.sh ../cbm_python_original
-```
-
-Open:
+Then open:
 
 ```text
-dev/manual_review/output/REPORT.md
+cbm/dev/manual_review/output/REPORT.md
 ```
 
-then inspect the generated diffs in:
+## Output
 
 ```text
-dev/manual_review/output/diffs/
+output/
+├── REPORT.md
+├── inventory.json
+├── shared_file_edits.json
+└── diffs/
+    ├── cbm__optimization.py.diff
+    ├── cbm__individual_fit.py.diff
+    └── ...
 ```
 
-## Review order
+`git ls-files` is used for both clones whenever possible. This is important:
+the report describes source-controlled files rather than local caches,
+`egg-info`, test outputs, or other untracked artifacts.
 
-Review the changes in this order:
+## Interpretation
 
-1. `cbm/optimization.py`
-   - multi-start L-BFGS-B;
-   - optional GN polish;
-   - central-FD / AD observed Hessian;
-   - no evidence-Hessian clipping;
-   - flags, warnings and diagnostics.
+The categories are directional:
 
-2. `cbm/map_estimation.py`
-   - scalar vs trialwise model return;
-   - free/fixed parameter mapping;
-   - JAX model path.
+```text
+ORIGINAL -> FORK
+```
 
-3. `cbm/individual_fit.py`
-   - public API;
-   - zero-variance fixed parameters;
-   - evidence validity;
-   - verbose/display behavior;
-   - observation/evolution outputs.
+Therefore:
 
-4. `cbm/display.py`
-   - verify display is diagnostics only;
-   - verify it cannot alter numerical outputs.
+- **new** = exists in fork but not original;
+- **deleted** = exists in original but not fork;
+- **shared** = exists at the same path in both;
+- **modified shared** = shared path, different contents.
 
-5. `cbm/model_selection.py` and `cbm/group_bms.py`
-   - BMS numerical changes separately from presentation.
-
-6. HBI files
-   - confirm the updated MAP/evidence contract is propagated correctly.
-
-7. `pyproject.toml`, README and examples
-   - review only after numerical behavior is agreed.
-
-## PR principle
-
-The PR should make it easy to distinguish:
-
-- numerical changes;
-- API changes;
-- diagnostics/plotting changes;
-- examples/documentation;
-- repository cleanup.
-
-Avoid mixing legacy copies or generated files into the upstream diff.
+The script also detects exact-content deleted/new pairs as possible file
+renames or moves.

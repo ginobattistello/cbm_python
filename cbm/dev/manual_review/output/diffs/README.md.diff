@@ -1,0 +1,112 @@
+--- original/README.md
++++ fork/README.md
+@@ -1,27 +1,50 @@
+ # CBM (Computational Brain/Behavior Modeling)
+ 
+-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+-[![License](https://img.shields.io/badge/license-Proprietary-red.svg)](LICENSE)
++CBM provides individual-level computational-model fitting, Bayesian model
++selection (BMS), and hierarchical Bayesian inference (HBI).
+ 
+-"Computational Brain/Behavior Modeling (CBM)" Library for model fitting and model selection.
++## Individual fitting
+ 
+-## Overview
++The current MAP pipeline separates optimization from Laplace curvature:
+ 
+-CBM provides a complete pipeline for fitting computational models to behavioral data and comparing competing models at the group level. The toolkit implements three core methods:
++1. multi-start L-BFGS-B searches for the MAP;
++2. trialwise likelihood models optionally receive a Gauss-Newton polish;
++3. the final observed posterior Hessian is recomputed independently at the MAP
++   using central finite differences by default, or JAX autodiff when supplied;
++4. the observed Hessian is never clipped for evidence.
+ 
+-1. **Individual-level fitting** uses Laplace approximation to estimate maximum a posteriori (MAP) parameters for each subject, providing both parameter estimates and model evidence.
++The result retains explicit diagnostics for L-BFGS-B termination, GN curvature,
++observed-Hessian positive definiteness/conditioning, invalid objective
++evaluations, hard-bound solutions, and Laplace validity.
+ 
+-2. **Bayesian Model Selection (BMS)** implements random effects analysis to determine the frequency of different models in the population, accounting for between-subject variability.
++A zero prior variance fixes a parameter exactly at its prior mean.
+ 
+-3. **Hierarchical Bayesian Inference (HBI)** performs joint fitting and model comparison, pooling information across subjects and models to improve parameter estimation while simultaneously inferring model frequencies.
++## Reproducibility
+ 
+-The library is designed for cognitive modeling applications where multiple computational models are fit to data from multiple subjects, and researchers need to determine which model best explains the data at the group level.
++`Config(random_state=...)` controls MAP random initializations without touching
++NumPy's global random state.
+ 
+-## Features
++BMS functions similarly accept `random_state=...` for Monte-Carlo exceedance
++probabilities.
+ 
+-- **Individual Fitting**: Maximum a posteriori (MAP) estimation with Laplace approximation
+-- **Bayesian Model Selection**: Random effects model selection with exceedance probabilities
+-- **Hierarchical Bayesian Inference**: Group-level inference across subjects and models
++## Data/model interface
++
++Each subject uses:
++
++```python
++data[n] = {
++    "y": observed_outcomes,
++    "X": model_inputs,
++}
++```
++
++`model(theta, data)` may return either a scalar summed log likelihood or a
++one-dimensional vector of per-observation contributions. A vector enables GN
++polishing automatically.
++
++Optional `observation(theta, data)` supplies prediction diagnostics.
++Optional `evolution(theta, data)` supplies deterministic latent trajectories
++evaluated once at the final MAP.
+ 
+ ## Installation
+ 
+@@ -31,28 +54,27 @@
+ pip install -e .
+ ```
+ 
+-## Examples
++For plotting:
+ 
+-- `examples/exampla_individual_fit.py`: Minimal individual fit
+-- `examples/example_model_selection.py`: BMS with linear models
+-- `examples/example.py`: HBI with linear models
+-- `examples/example_RL.py`: Individual fit and HBI with RL vs RL2 (dual learning rates)
++```bash
++pip install -e ".[display]"
++```
+ 
+-Outputs are written to `examples/output/`.
++For optional autodiff Hessians:
+ 
+-## Development
++```bash
++pip install -e ".[autodiff]"
++```
+ 
+-- Python >= 3.9
+-- Dependencies: NumPy, SciPy, Pickle
+-- Logs and pickle outputs are stored under `examples/output/`
++## Testing
+ 
++```bash
++pip install -e ".[dev]"
++pytest
++```
+ 
+-## Related packages
++## Reference
+ 
+-- [cbm_power](https://github.com/payampiray/cbm_power): CBM library for power analysis and sample-size optimization for computational studies.
+-
+-- A MATLAB implementation of CBM: [github.com/payampiray/cbm](https://github.com/payampiray/cbm).
+-
+-## References
+-If you use this package, please cite the following paper:
+-- Piray et al., "Hierarchical Bayesian inference for concurrent model fitting and comparison for group studies", *PLoS Computational Biology*, 2019.
++Piray P, Dezfouli A, Heskes T, Frank MJ, Daw ND. Hierarchical Bayesian
++inference for concurrent model fitting and comparison for group studies.
++PLoS Computational Biology (2019).

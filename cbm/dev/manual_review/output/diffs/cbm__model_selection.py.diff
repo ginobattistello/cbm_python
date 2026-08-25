@@ -1,0 +1,459 @@
+--- original/cbm/model_selection.py
++++ fork/cbm/model_selection.py
+@@ -1,34 +1,34 @@
++"""Bayesian Model Selection for Group Studies.
++
++References
++----------
++Stephan KE et al. (2009), NeuroImage 46:1004-1017.
++Rigoux L et al. (2014), NeuroImage 84:971-985.
+ """
+-Bayesian Model Selection for Group Studies
+---------------------------------------
+-REFERENCES:
+-Stephan KE, Penny WD, Daunizeau J, Moran RJ, Friston KJ (2009)
+-Bayesian Model Selection for Group Studies. NeuroImage 46:1004-1017
+-
+-Rigoux, L, Stephan, KE, Friston, KJ and Daunizeau, J. (2014)
+-Bayesian model selection for group studies—Revisited.
+-NeuroImage 84:971-85. doi: 10.1016/j.neuroimage.2013.08.065
+-"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional, Tuple, Union
+ 
+ import numpy as np
+ from scipy.special import psi, gammaln
+-from typing import Optional, Tuple
+-from dataclasses import dataclass
++
++
++RandomStateLike = Optional[Union[int, np.random.Generator]]
++
++
++def _resolve_rng(random_state: RandomStateLike) -> np.random.Generator:
++    """Return a local Generator without touching NumPy's global RNG."""
++    if isinstance(random_state, np.random.Generator):
++        return random_state
++    return np.random.default_rng(random_state)
+ 
+ 
+ @dataclass
+ class BMSResult:
+-    """
+-    Result from Bayesian Model Selection.
+-
+-    Attributes:
+-        model_frequency: Expectation of the posterior p(r|y) - expected model frequencies
+-        exceedance_prob: Exceedance probabilities
+-        protected_exceedance_prob: Protected exceedance probabilities
+-        posterior_parameters: Vector of model probabilities (posterior Dirichlet parameters)
+-        bor: Bayes Omnibus Risk (probability that model frequencies are equal)
+-        g: Posterior belief g(i,k) = q(m_i=k|y_i) that model k generated data for subject i
+-    """
++    """Result from Bayesian model selection."""
++
+     model_frequency: np.ndarray
+     exceedance_prob: Optional[np.ndarray]
+     protected_exceedance_prob: Optional[np.ndarray]
+@@ -37,87 +37,72 @@
+     g: np.ndarray
+ 
+ 
+-def bms(lme: np.ndarray,
+-        Nsamp: int = int(1e6),
+-        alpha0: Optional[np.ndarray] = None) -> BMSResult:
++def bms(
++    lme: np.ndarray,
++    Nsamp: int = int(1e6),
++    alpha0: Optional[np.ndarray] = None,
++    random_state: RandomStateLike = None,
++) -> BMSResult:
++    """Bayesian model selection for group studies.
++
++    Parameters
++    ----------
++    lme
++        Subjects x models log-model-evidence matrix.
++    Nsamp
++        Monte-Carlo samples used for exceedance probabilities.
++    alpha0
++        Prior Dirichlet model counts.
++    random_state
++        Integer seed, ``numpy.random.Generator``, or ``None``. This controls
++        only Monte-Carlo exceedance sampling; the VB solution is deterministic.
+     """
+-    Bayesian model selection for group studies.
+-
+-    Args:
+-        lme: Array of log model evidences
+-             rows: subjects
+-             columns: models (1..Nk)
+-        Nsamp: Number of samples used to compute exceedance probabilities (default: 1e6)
+-        alpha0: [1 x Nk] vector of prior model counts
+-
+-    Returns:
+-        BMSResult dataclass containing:
+-            - alpha: vector of model probabilities
+-            - exp_r: expectation of the posterior p(r|y)
+-            - xp: exceedance probabilities
+-            - pxp: protected exceedance probabilities
+-            - bor: Bayes Omnibus Risk
+-            - g: posterior beliefs
+-    """
+-    Ni = lme.shape[0]  # number of subjects
+-    Nk = lme.shape[1]  # number of models
+-
+-    cc = 10e-4  # convergence criterion
+-
+-    # Prior observations
++    lme = np.asarray(lme, dtype=float)
++    if lme.ndim != 2:
++        raise ValueError("lme must be a 2D subjects x models array")
++    if not np.all(np.isfinite(lme)):
++        raise ValueError("lme contains non-finite values")
++
++    Ni, Nk = lme.shape
++    cc = 10e-4
++
+     if alpha0 is None:
+         alpha0 = np.ones(Nk)
++    alpha0 = np.asarray(alpha0, dtype=float).reshape(-1)
++    if alpha0.shape != (Nk,) or np.any(alpha0 <= 0):
++        raise ValueError("alpha0 must contain one positive value per model")
+ 
+     alpha = alpha0.copy()
+ 
+-    # Iterative VB estimation
+     converged = False
+     while not converged:
+-        # Compute posterior belief g(i,k)=q(m_i=k|y_i) that model k generated
+-        # the data for the i-th subject
+         log_u = np.zeros((Ni, Nk))
+-
+         for i in range(Ni):
+             for k in range(Nk):
+-                # Integrate out prior probabilities of models (in log space)
+-                log_u[i, k] = lme[i, k] + psi(alpha[k]) - psi(np.sum(alpha))
+-
+-        # Exponentiate (to get back to non-log representation)
++                log_u[i, k] = (
++                    lme[i, k]
++                    + psi(alpha[k])
++                    - psi(np.sum(alpha))
++                )
++
+         u = np.exp(log_u - np.max(log_u, axis=1, keepdims=True))
+-
+-        # Normalisation: sum across all models for i-th subject
+-        u_i = np.sum(u, axis=1, keepdims=True)
+-        g = u / u_i
+-
+-        # Expected number of subjects whose data we believe to have been
+-        # generated by model k
++        g = u / np.sum(u, axis=1, keepdims=True)
+         beta = np.sum(g, axis=0)
+ 
+-        # Update alpha
+         prev = alpha.copy()
+         alpha = alpha0 + beta
+-
+-        # Check convergence
+-        c = np.linalg.norm(alpha - prev)
+-        if c <= cc:
+-            converged = True
+-
+-    # Compute expectation of the posterior p(r|y)
++        converged = np.linalg.norm(alpha - prev) <= cc
++
+     exp_r = alpha / np.sum(alpha)
+ 
+-    # Compute exceedance probabilities p(r_i>r_j)
+-    xp = dirichlet_exceedance(alpha, Nsamp)
+-
+-    # Compute Bayes Omnibus Risk
+-    posterior = {'a': alpha, 'r': g.T}
+-    priors = {'a': alpha0}
++    rng = _resolve_rng(random_state)
++    xp = dirichlet_exceedance(alpha, Nsamp, random_state=rng)
++
++    posterior = {"a": alpha, "r": g.T}
++    priors = {"a": alpha0}
+     bor = compute_bor(lme.T, posterior, priors)
+ 
+-    # Compute protected exceedance probabilities - Eq 7 in Rigoux et al.
+-    if xp is not None:
+-        pxp = (1 - bor) * xp + bor / Nk
+-    else:
+-        pxp = None
++    pxp = (1 - bor) * xp + bor / Nk if xp is not None else None
+ 
+     return BMSResult(
+         posterior_parameters=alpha,
+@@ -125,162 +110,135 @@
+         exceedance_prob=xp,
+         protected_exceedance_prob=pxp,
+         bor=bor,
+-        g=g
++        g=g,
+     )
+ 
+ 
+-def compute_bor(L: np.ndarray,
+-                posterior: dict,
+-                priors: dict,
+-                C: Optional[np.ndarray] = None) -> float:
+-    """
+-    Compute Bayes Omnibus Risk.
+-
+-    Args:
+-        L: Log model evidence table (models x subjects)
+-        posterior: Dictionary with keys 'a' (model counts) and 'r' (model-subject probs)
+-        priors: Dictionary with key 'a' (model counts)
+-        C: If specified, BOR under family prior is computed
+-           C(k,f) = 1 if model k belongs to family f (0 otherwise)
+-
+-    Returns:
+-        bor: Bayes Omnibus Risk (probability that model frequencies are equal)
+-    """
++def compute_bor(
++    L: np.ndarray,
++    posterior: dict,
++    priors: dict,
++    C: Optional[np.ndarray] = None,
++) -> float:
++    """Compute Bayes Omnibus Risk."""
+     if C is None:
+-        options = {'families': False}
+-        # Evidence of null (equal model freqs)
++        options = {"families": False}
+         F0, _ = fe_null(L, options)
+     else:
+-        options = {'families': True, 'C': C}
+-        # Evidence of null (equal model freqs) under family prior
++        options = {"families": True, "C": C}
+         _, F0 = fe_null(L, options)
+ 
+-    # Evidence of alternative
+     F1 = compute_fe(L, posterior, priors)
+-
+-    # Implied by Eq 5 (see also p39) in Rigoux et al.
+-    bor = 1.0 / (1.0 + np.exp(F1 - F0))
+-
+-    return bor
+-
+-
+-def compute_fe(L: np.ndarray,
+-               posterior: dict,
+-               priors: dict) -> float:
+-    """
+-    Derives the free energy for the current approximate posterior.
+-
+-    This routine has been adapted from the VBA_groupBMC function
+-    of the VBA toolbox written by Lionel Rigoux and J. Daunizeau.
+-
+-    See equation A.20 in Rigoux et al.
+-
+-    Args:
+-        L: Log model evidence table (models x subjects)
+-        posterior: Dictionary with 'a' and 'r'
+-        priors: Dictionary with 'a'
+-
+-    Returns:
+-        F: Free energy
+-    """
++    return float(1.0 / (1.0 + np.exp(F1 - F0)))
++
++
++def compute_fe(L: np.ndarray, posterior: dict, priors: dict) -> float:
++    """Variational free energy for the current approximate posterior."""
+     K, n = L.shape
+-    a0 = np.sum(posterior['a'])
+-    Elogr = psi(posterior['a']) - psi(np.sum(posterior['a']))
+-
+-    # Entropy of Dirichlet
+-    Sqf = np.sum(gammaln(posterior['a'])) - gammaln(a0) - np.sum((posterior['a'] - 1) * Elogr)
+-
+-    # Entropy of categorical
+-    Sqm = 0
++    a0 = np.sum(posterior["a"])
++    Elogr = psi(posterior["a"]) - psi(np.sum(posterior["a"]))
++
++    Sqf = (
++        np.sum(gammaln(posterior["a"]))
++        - gammaln(a0)
++        - np.sum((posterior["a"] - 1) * Elogr)
++    )
++
++    Sqm = 0.0
+     for i in range(n):
+-        Sqm = Sqm - np.sum(posterior['r'][:, i] * np.log(posterior['r'][:, i] + np.finfo(float).eps))
+-
+-    # Expected log joint
+-    ELJ = gammaln(np.sum(priors['a'])) - np.sum(gammaln(priors['a'])) + np.sum((priors['a'] - 1) * Elogr)
++        Sqm -= np.sum(
++            posterior["r"][:, i]
++            * np.log(posterior["r"][:, i] + np.finfo(float).eps)
++        )
++
++    ELJ = (
++        gammaln(np.sum(priors["a"]))
++        - np.sum(gammaln(priors["a"]))
++        + np.sum((priors["a"] - 1) * Elogr)
++    )
++
+     for i in range(n):
+         for k in range(K):
+-            ELJ = ELJ + posterior['r'][k, i] * (Elogr[k] + L[k, i])
+-
+-    F = ELJ + Sqf + Sqm
+-
+-    return F
+-
+-
+-def fe_null(L: np.ndarray, options: dict) -> Tuple[float, Optional[float]]:
+-    """
+-    Free energy of the 'null' (H0: equal frequencies).
+-
+-    Args:
+-        L: Log model evidence table (models x subjects)
+-        options: Dictionary with 'families' key and optionally 'C' key
+-
+-    Returns:
+-        F0m: Evidence for null (equal probs) over models
+-        F0f: Evidence for null (equal probs) over families (or None)
+-    """
++            ELJ += posterior["r"][k, i] * (
++                Elogr[k] + L[k, i]
++            )
++
++    return float(ELJ + Sqf + Sqm)
++
++
++def fe_null(
++    L: np.ndarray,
++    options: dict,
++) -> Tuple[float, Optional[float]]:
++    """Free energy of the null hypothesis of equal frequencies."""
+     K, n = L.shape
+ 
+-    if options['families']:
+-        C = options['C']
+-        f0 = C @ (np.sum(C, axis=1) ** -1) / C.shape[1]
+-        F0f = 0
++    if options["families"]:
++        C = options["C"]
++        # Equal total mass per family, divided equally between its models.
++        f0 = C @ (np.sum(C, axis=0) ** -1.0) / C.shape[1]
++        F0f = 0.0
+     else:
+         F0f = None
+ 
+-    F0m = 0
++    F0m = 0.0
++
+     for i in range(n):
+         tmp = L[:, i] - np.max(L[:, i])
+         g = np.exp(tmp) / np.sum(np.exp(tmp))
+ 
+         for k in range(K):
+-            F0m = F0m + g[k] * (L[k, i] - np.log(K) - np.log(g[k] + np.finfo(float).eps))
+-            if options['families']:
+-                F0f = F0f + g[k] * (L[k, i] - np.log(g[k] + np.finfo(float).eps) + np.log(f0[k]))
+-
+-    return F0m, F0f
+-
+-
+-def dirichlet_exceedance(alpha: np.ndarray, Nsamp: int) -> np.ndarray:
++            F0m += g[k] * (
++                L[k, i]
++                - np.log(K)
++                - np.log(g[k] + np.finfo(float).eps)
++            )
++
++            if options["families"]:
++                F0f += g[k] * (
++                    L[k, i]
++                    - np.log(g[k] + np.finfo(float).eps)
++                    + np.log(f0[k])
++                )
++
++    return float(F0m), None if F0f is None else float(F0f)
++
++
++def dirichlet_exceedance(
++    alpha: np.ndarray,
++    Nsamp: int,
++    random_state: RandomStateLike = None,
++) -> np.ndarray:
++    """Monte-Carlo exceedance probabilities for a Dirichlet distribution.
++
++    Uses a local ``numpy.random.Generator`` so callers can reproduce BMS
++    figures/results without modifying global NumPy random state.
+     """
+-    Compute exceedance probabilities for a Dirichlet distribution.
+-
+-    This function computes exceedance probabilities, i.e. for any given model k1,
+-    the probability that it is more likely than any other model k2.
+-
+-    Args:
+-        alpha: Dirichlet parameters
+-        Nsamp: Number of samples used to compute xp
+-
+-    Returns:
+-        xp: Exceedance probability for each model
+-    """
++    alpha = np.asarray(alpha, dtype=float).reshape(-1)
++    if np.any(alpha <= 0):
++        raise ValueError("Dirichlet parameters must be positive")
++    if int(Nsamp) <= 0:
++        raise ValueError("Nsamp must be > 0")
++
++    rng = _resolve_rng(random_state)
+     Nk = len(alpha)
+-
+-    # Perform sampling in blocks to manage memory
+-    blk = int(np.ceil(Nsamp * Nk * 8 / 2 ** 28))
+-    blk = np.floor(Nsamp / blk * np.ones(blk)).astype(int)
++    Nsamp = int(Nsamp)
++
++    blk_n = int(np.ceil(Nsamp * Nk * 8 / 2 ** 28))
++    blk = np.floor(
++        Nsamp / blk_n * np.ones(blk_n)
++    ).astype(int)
+     blk[-1] = Nsamp - np.sum(blk[:-1])
+ 
+     xp = np.zeros(Nk)
+ 
+-    for i in range(len(blk)):
+-        # Sample from univariate gamma densities then normalise
+-        # (see Dirichlet entry in Wikipedia or Ferguson (1973) Ann. Stat. 1, 209-230)
+-        r = np.zeros((blk[i], Nk))
++    for n_block in blk:
++        r = np.zeros((n_block, Nk))
+         for k in range(Nk):
+-            r[:, k] = np.random.gamma(alpha[k], 1, blk[i])
+-
+-        # Normalize
+-        sr = np.sum(r, axis=1, keepdims=True)
+-        r = r / sr
+-
+-        # Exceedance probabilities:
+-        # For any given model k1, compute the probability that it is more
+-        # likely than any other model k2~=k1
+-        j = np.argmax(r, axis=1)
+-        xp = xp + np.bincount(j, minlength=Nk)
+-
+-    xp = xp / Nsamp
+-
+-    return xp
+-
++            r[:, k] = rng.gamma(alpha[k], 1.0, n_block)
++
++        r /= np.sum(r, axis=1, keepdims=True)
++        winner = np.argmax(r, axis=1)
++        xp += np.bincount(winner, minlength=Nk)
++
++    return xp / Nsamp

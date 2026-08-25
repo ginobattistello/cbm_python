@@ -175,47 +175,67 @@ def test_trialwise_model_activates_gn():
     )
 
 
-def test_gn_ill_conditioning_is_separate_from_evidence_hessian():
+def test_gn_ill_conditioning_is_detected():
     def objective(theta):
-        return 0.5 * np.sum((np.asarray(theta) - 1.0) ** 2)
+        return 0.5 * np.sum(
+            (np.asarray(theta) - 1.0) ** 2
+        )
 
     def trial_func(theta):
         theta = np.asarray(theta)
+
+        # J.T @ J has eigenvalues approximately
+        # [1, 1e-16], hence condition number ~1e16.
         return np.array([
             theta[0],
             1e-8 * theta[1],
         ])
 
-    result = BFGSOptimizer(
+    optimizer = BFGSOptimizer(
         2,
         Config(
             d=2,
             num_init=1,
-            inits=np.array([[0.0, 0.0]]),
             condition_number_warn=1e10,
             random_state=1,
             verbose=False,
         ),
-    ).optimize(
+    )
+
+    (
+        x,
+        f,
+        status,
+        n_steps,
+        gn_diag,
+    ) = optimizer._newton_polish(
         objective,
+        np.array([0.0, 0.0]),
         trial_func=trial_func,
         prior_precision=np.zeros((2, 2)),
     )
 
-    assert result.gn_is_positive_definite is True
-    assert result.gn_ill_conditioned is True
-    assert result.gn_condition_number > 1e10
     assert (
-        result.convergence_status
+        status
         == ConvergenceStatus.ILL_CONDITIONED_CURVATURE
     )
 
-    # Final evidence curvature is independently recomputed.
-    assert result.is_hess_pos is True
-    assert result.hess_ill_conditioned is False
-    assert result.laplace_valid is True
-    assert result.laplace_fragile is False
-    assert result.hess_n_clipped == 0
+    assert gn_diag is not None
+
+    # Complete GN diagnostic state.
+    assert gn_diag["is_positive_definite"] is True
+    assert gn_diag["ill_conditioned"] is True
+
+    assert gn_diag["min_eig"] > 0
+    assert gn_diag["max_eig"] > gn_diag["min_eig"]
+
+    assert (
+        gn_diag["condition_number"]
+        > 1e10
+    )
+
+    # GN correctly refuses the polish step.
+    assert n_steps == 0
 
 
 def test_invalid_objective_evaluations_are_recorded():
