@@ -506,6 +506,8 @@ def individual_fit(
             num_init
             hessian_method = "central_fd" | "autodiff"
             hessian_step
+            random_state
+            condition_number_warn
 
     model_jax
         Optional JAX implementation following the same scalar-or-vector
@@ -712,6 +714,53 @@ def individual_fit(
 
         if subject_warnings is not None:
             diag_n.warnings = subject_warnings
+
+        if config.verbose:
+            lbfgs_state = (
+                "ok" if diag_n.lbfgsb_success else
+                f"WARNING status={diag_n.lbfgsb_status}"
+            )
+            print(f"  L-BFGS-B: {lbfgs_state}")
+
+            if diag_n.gn_condition_number is None:
+                print(f"  GN polish: {diag_n.convergence_status}")
+            else:
+                gn_state = (
+                    "ill-conditioned"
+                    if diag_n.gn_ill_conditioned
+                    else "well-conditioned"
+                )
+                print(
+                    "  GN polish: "
+                    f"{diag_n.convergence_status}; "
+                    f"kappa={diag_n.gn_condition_number:.3e} "
+                    f"({gn_state})"
+                )
+
+            h_state = (
+                "ill-conditioned"
+                if diag_n.hess_ill_conditioned
+                else "well-conditioned"
+            )
+            print(
+                "  Observed Hessian: "
+                f"{diag_n.hess_method}; "
+                f"kappa={diag_n.hess_condition_number:.3e} "
+                f"({h_state})"
+            )
+
+            laplace_text = (
+                "yes, numerically fragile"
+                if diag_n.laplace_fragile
+                else ("yes" if diag_n.laplace_valid else "NO")
+            )
+            print(f"  Laplace valid: {laplace_text}")
+
+            if diag_n.n_invalid_evaluations:
+                print(
+                    "  Invalid objective evaluations: "
+                    f"{diag_n.n_invalid_evaluations}"
+                )
 
         # ---------------------------------------------------------
         # True optimization failure: preserve legacy prior fallback.

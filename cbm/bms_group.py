@@ -60,6 +60,14 @@ import numpy as np
 from .model_selection import bms, compute_bor, compute_fe, dirichlet_exceedance
 
 
+def _bms_rng(random_state=None):
+    """Return/reuse a local Generator for reproducible Monte-Carlo BMS."""
+    if isinstance(random_state, np.random.Generator):
+        return random_state
+    return np.random.default_rng(random_state)
+
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Result dataclasses (DEV.md §5: "Return dataclasses, not nested dicts")
 # ═══════════════════════════════════════════════════════════════════
@@ -419,7 +427,8 @@ def bms_group(L: np.ndarray,
               family_names: Optional[Sequence[str]] = None,
               n_samples: int = 1_000_000,
               verbose: bool = True,
-              display: bool = False) -> GroupBMSResult:
+              display: bool = False,
+              random_state=None) -> GroupBMSResult:
     """
     Standard group-level BMS (≈ VBA_groupBMC).
 
@@ -431,6 +440,8 @@ def bms_group(L: np.ndarray,
         n_samples: Monte-Carlo samples for exceedance probabilities.
         verbose: If True, print a compact CBM-style run/result summary.
         display: If True, automatically show the BMS diagnostic figure.
+        random_state: Integer seed, NumPy Generator, or None for exceedance
+            Monte-Carlo sampling. The VB solution itself is deterministic.
 
     Returns:
         GroupBMSResult (with .families set when families were given).
@@ -439,6 +450,7 @@ def bms_group(L: np.ndarray,
     if L.ndim != 2:
         raise ValueError(f"L must be 2D (subjects × models), got ndim={L.ndim}")
     n_sub, n_mod = L.shape
+    rng = _bms_rng(random_state)
 
     if verbose:
         _print_bms_header(
@@ -453,7 +465,7 @@ def bms_group(L: np.ndarray,
         # count (`priors.a = priors.a./sum(priors.a)`), i.e. 1/K per
         # model — not bms()'s default of one count PER model.
         a0 = np.ones(n_mod) / n_mod
-        res = bms(L, Nsamp=int(n_samples), alpha0=a0)
+        res = bms(L, Nsamp=int(n_samples), alpha0=a0, random_state=rng)
         F = compute_fe(L.T, {"a": res.posterior_parameters, "r": res.g.T},
                        {"a": a0})
         result = GroupBMSResult(
@@ -485,14 +497,14 @@ def bms_group(L: np.ndarray,
     for arr in fams:
         a0[arr] = 1.0 / (nf * len(arr))
 
-    res = bms(L, Nsamp=int(n_samples), alpha0=a0)
+    res = bms(L, Nsamp=int(n_samples), alpha0=a0, random_state=rng)
     a = res.posterior_parameters
 
     # Family posterior: aggregating Dirichlet components sums their
     # parameters exactly — no sampling needed for α_fam or E[r_fam].
     a_fam = C.T @ a
     fam_ef = a_fam / a_fam.sum()
-    fam_xp = dirichlet_exceedance(a_fam, int(n_samples))
+    fam_xp = dirichlet_exceedance(a_fam, int(n_samples), random_state=rng)
 
     # Family BOR from the family free energy (Rigoux et al. 2014 Eq. 5)
     # via the toolbox's own compute_bor — same call pattern as bms()'s
@@ -513,7 +525,7 @@ def bms_group(L: np.ndarray,
     within = []
     for f, arr in enumerate(fams):
         a0w = np.ones(len(arr)) / len(arr)
-        rw = bms(L[:, arr], Nsamp=int(n_samples), alpha0=a0w)
+        rw = bms(L[:, arr], Nsamp=int(n_samples), alpha0=a0w, random_state=rng)
         within.append(WithinFamilyResult(
             name=names[f],
             models=arr,
@@ -640,7 +652,8 @@ def bms_group_btw_conds(L: np.ndarray,
                         family_names: Optional[Sequence[str]] = None,
                         n_samples: int = 1_000_000,
                         verbose: bool = True,
-                        display: bool = False) -> BtwCondsResult:
+                        display: bool = False,
+                        random_state=None) -> BtwCondsResult:
     """
     Between-conditions BMS (≈ VBA_groupBMC_btwConds): do the SAME
     subjects use the same model (or family) across conditions?
@@ -658,6 +671,7 @@ def bms_group_btw_conds(L: np.ndarray,
         raise ValueError(
             f"L must be 3D (subjects × models × conditions), got ndim={L.ndim}")
     n_sub, n_mod, n_cond = L.shape
+    rng = _bms_rng(random_state)
     if n_cond < 2:
         raise ValueError(
             "between-conditions BMS needs >= 2 conditions; "
@@ -679,6 +693,7 @@ def bms_group_btw_conds(L: np.ndarray,
         n_samples=n_samples,
         verbose=False,
         display=False,
+        random_state=rng,
     )
     per_cond = [
         bms_group(
@@ -688,6 +703,7 @@ def bms_group_btw_conds(L: np.ndarray,
             n_samples=n_samples,
             verbose=False,
             display=False,
+            random_state=rng,
         )
         for c in range(n_cond)
     ]
@@ -719,7 +735,8 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
                          family_names: Optional[Sequence[str]] = None,
                          n_samples: int = 1_000_000,
                          verbose: bool = True,
-                         display: bool = False) -> BtwGroupsResult:
+                         display: bool = False,
+                         random_state=None) -> BtwGroupsResult:
     """
     Between-groups BMS (= VBA_groupBMC_btwGroups): do DIFFERENT groups
     of subjects have the same model frequencies?
@@ -749,6 +766,8 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
     if n_mod < 2:
         raise ValueError("between-groups BMS needs >= 2 models")
 
+    rng = _bms_rng(random_state)
+
     # H0: one frequency vector for all subjects (pooled fit)
     # Internal pooled/group fits are implementation details: keep them quiet.
     pooled = bms_group(
@@ -758,6 +777,7 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
         n_samples=n_samples,
         verbose=False,
         display=False,
+        random_state=rng,
     )
 
     # H1: each group gets its own frequency vector (separate fits)
@@ -769,6 +789,7 @@ def bms_group_btw_groups(Ls: Sequence[np.ndarray],
             n_samples=n_samples,
             verbose=False,
             display=False,
+            random_state=rng,
         )
         for Lg in Ls
     ]

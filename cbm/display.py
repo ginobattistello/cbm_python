@@ -260,6 +260,17 @@ def _flag_lines(result, i: int) -> List[tuple]:
 
     lines = []
 
+    lbfgs_success = getattr(diag, "lbfgsb_success", None)
+    lbfgs_status = getattr(diag, "lbfgsb_status", None)
+    if lbfgs_success is not None:
+        lines.append(
+            (
+                "L-BFGS-B: "
+                + ("converged" if lbfgs_success else f"WARNING status={lbfgs_status}"),
+                not bool(lbfgs_success),
+            )
+        )
+
     status = getattr(diag, "convergence_status", None)
     healthy_status = status in (
         "converged_df",
@@ -268,10 +279,21 @@ def _flag_lines(result, i: int) -> List[tuple]:
     )
     lines.append(
         (
-            f"MAP optimization: {status}",
+            f"GN polish: {status}",
             not healthy_status,
         )
     )
+
+    gn_condition = getattr(diag, "gn_condition_number", None)
+    if gn_condition is not None:
+        gn_bad = bool(getattr(diag, "gn_ill_conditioned", False))
+        lines.append(
+            (
+                f"GN curvature kappa: {gn_condition:.2e}"
+                + (" — ill-conditioned" if gn_bad else ""),
+                gn_bad,
+            )
+        )
 
     lines.append(
         (
@@ -280,11 +302,28 @@ def _flag_lines(result, i: int) -> List[tuple]:
         )
     )
 
+    hcond = getattr(diag, "hess_condition_number", None)
+    hbad = bool(getattr(diag, "hess_ill_conditioned", False))
+    if hcond is not None:
+        lines.append(
+            (
+                f"observed Hessian kappa: {hcond:.2e}"
+                + (" — ill-conditioned" if hbad else ""),
+                hbad,
+            )
+        )
+
     laplace_valid = bool(getattr(diag, "laplace_valid", False))
+    laplace_fragile = bool(getattr(diag, "laplace_fragile", False))
+    laplace_label = (
+        "yes — numerically fragile"
+        if laplace_fragile
+        else ("yes" if laplace_valid else "NO")
+    )
     lines.append(
         (
-            f"Laplace valid: {'yes' if laplace_valid else 'NO'}",
-            not laplace_valid,
+            f"Laplace valid: {laplace_label}",
+            (not laplace_valid) or laplace_fragile,
         )
     )
 
@@ -309,6 +348,15 @@ def _flag_lines(result, i: int) -> List[tuple]:
     if nia is not None:
         lines.append(
             (f"inits agreeing: {nia}/{nr}", nia == 0)
+        )
+
+    invalid_n = int(getattr(diag, "n_invalid_evaluations", 0) or 0)
+    if invalid_n:
+        lines.append(
+            (
+                f"invalid objective evaluations: {invalid_n}",
+                True,
+            )
         )
 
     ahb = getattr(diag, "at_hard_bounds", None)

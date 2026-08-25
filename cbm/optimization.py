@@ -34,6 +34,7 @@ class ConvergenceStatus(str, Enum):
     NO_IMPROVEMENT = "no_improvement"
     MAX_STEPS = "max_steps"
     SINGULAR_CURVATURE = "singular_curvature"
+    ILL_CONDITIONED_CURVATURE = "ill_conditioned_curvature"
     SKIPPED_NO_TRIAL_FUNC = "skipped_no_trial_func"
 
 
@@ -67,9 +68,18 @@ class Config:
     # automatically display the diagnostic figure after fitting.
     display: bool = False
 
+    # Reproducible multi-start initialization. ``None`` keeps stochastic
+    # behavior while still using a local Generator rather than global NumPy RNG.
+    random_state: Optional[int] = None
+
     # Final observed-Hessian backend.
     hessian_method: str = "central_fd"
     hessian_step: float = 1e-4
+
+    # Conditioning threshold used for BOTH GN optimization curvature and the
+    # independent post-MAP observed Hessian. Ill-conditioning is diagnosed,
+    # never repaired by clipping.
+    condition_number_warn: float = 1e12
 
     def __post_init__(self):
         if self.d is None:
@@ -111,6 +121,9 @@ class Config:
         if self.hessian_step <= 0:
             raise ValueError("hessian_step must be > 0")
 
+        if self.condition_number_warn <= 1.0:
+            raise ValueError("condition_number_warn must be > 1")
+
 
 def _expand_bounds(bounds, d: int, default: float, name: str) -> np.ndarray:
     """Return bounds as a validated 2 x d float array."""
@@ -140,12 +153,33 @@ class PostFitDiagnostics:
     hess_method: str
     abs_grad: float
     hess_raw_min_eig: Optional[float]
+    hess_raw_max_eig: Optional[float]
     hess_n_clipped: int
     hess_condition_number: Optional[float]
+    hess_ill_conditioned: bool
     laplace_valid: bool
-    n_inits_agreeing: Optional[int]
-    n_runs: int
-    at_hard_bounds: Optional[list]
+    laplace_fragile: bool
+
+    # Optimization-only GN curvature diagnostics. These are deliberately
+    # separate from the final observed Hessian used for evidence.
+    gn_min_eig: Optional[float] = None
+    gn_max_eig: Optional[float] = None
+    gn_condition_number: Optional[float] = None
+    gn_is_positive_definite: Optional[bool] = None
+    gn_ill_conditioned: Optional[bool] = None
+
+    # Winning L-BFGS-B termination metadata.
+    lbfgsb_success: Optional[bool] = None
+    lbfgsb_status: Optional[int] = None
+    lbfgsb_message: Optional[str] = None
+
+    # Objective-domain diagnostics.
+    n_invalid_evaluations: int = 0
+    first_invalid_evaluation: Optional[str] = None
+    hessian_invalid_evaluations: int = 0
+    n_inits_agreeing: Optional[int] = None
+    n_runs: int = 0
+    at_hard_bounds: Optional[list] = None
     weak_identifiability: Optional[float] = None
 
     # Only populated when Config.display=True.
@@ -185,12 +219,31 @@ class OptimizationResult:
     hess_method: str = "central_fd"
     convergence_status: Optional[ConvergenceStatus] = None
 
-    # Minimum eigenvalue of the unmodified observed Hessian.
+    # Eigenvalues/conditioning of the UNMODIFIED observed Hessian.
     hess_raw_min_eig: Optional[float] = None
+    hess_raw_max_eig: Optional[float] = None
     # Kept at zero for compatibility; the final Hessian is never clipped.
     hess_n_clipped: int = 0
     hess_condition_number: Optional[float] = None
+    hess_ill_conditioned: bool = False
     laplace_valid: bool = False
+    laplace_fragile: bool = False
+
+    # Optimization-only GN curvature diagnostics.
+    gn_min_eig: Optional[float] = None
+    gn_max_eig: Optional[float] = None
+    gn_condition_number: Optional[float] = None
+    gn_is_positive_definite: Optional[bool] = None
+    gn_ill_conditioned: Optional[bool] = None
+
+    # Winning L-BFGS-B termination metadata.
+    lbfgsb_status: Optional[int] = None
+    lbfgsb_message: Optional[str] = None
+
+    # Objective-domain diagnostics.
+    n_invalid_evaluations: int = 0
+    first_invalid_evaluation: Optional[str] = None
+    hessian_invalid_evaluations: int = 0
 
     n_inits_agreeing: Optional[int] = None
     at_hard_bounds: Optional[np.ndarray] = None
@@ -223,9 +276,23 @@ class OptimizationResult:
             hess_method=self.hess_method,
             abs_grad=float(self.abs_g),
             hess_raw_min_eig=self.hess_raw_min_eig,
+            hess_raw_max_eig=self.hess_raw_max_eig,
             hess_n_clipped=0,
             hess_condition_number=self.hess_condition_number,
+            hess_ill_conditioned=self.hess_ill_conditioned,
             laplace_valid=self.laplace_valid,
+            laplace_fragile=self.laplace_fragile,
+            gn_min_eig=self.gn_min_eig,
+            gn_max_eig=self.gn_max_eig,
+            gn_condition_number=self.gn_condition_number,
+            gn_is_positive_definite=self.gn_is_positive_definite,
+            gn_ill_conditioned=self.gn_ill_conditioned,
+            lbfgsb_success=bool(self.success),
+            lbfgsb_status=self.lbfgsb_status,
+            lbfgsb_message=self.lbfgsb_message,
+            n_invalid_evaluations=self.n_invalid_evaluations,
+            first_invalid_evaluation=self.first_invalid_evaluation,
+            hessian_invalid_evaluations=self.hessian_invalid_evaluations,
             n_inits_agreeing=self.n_inits_agreeing,
             n_runs=self.n_runs,
             at_hard_bounds=(
@@ -271,6 +338,12 @@ class BFGSOptimizer:
         ).lower()
         self.hessian_step = float(
             getattr(config, "hessian_step", 1e-4)
+        )
+        self.condition_number_warn = float(
+            getattr(config, "condition_number_warn", 1e12)
+        )
+        self.rng = np.random.default_rng(
+            getattr(config, "random_state", None)
         )
 
         self.gtol = gtol
@@ -446,9 +519,15 @@ class BFGSOptimizer:
         diag = {
             "method": method,
             "raw_min_eig": min_eig,
+            "raw_max_eig": max_eig,
             "n_clipped": 0,
             "is_positive_definite": is_pd,
             "condition_number": condition_number,
+            "ill_conditioned": bool(
+                is_pd
+                and np.isfinite(condition_number)
+                and condition_number > self.condition_number_warn
+            ),
         }
 
         if return_diagnostics:
@@ -510,6 +589,8 @@ class BFGSOptimizer:
             is_hess_pos=False,
             abs_g=abs_g,
             x_init=np.asarray(x_init, dtype=float).copy(),
+            lbfgsb_status=int(scipy_result.status),
+            lbfgsb_message=str(scipy_result.message),
         )
 
     # -----------------------------------------------------------------
@@ -537,6 +618,7 @@ class BFGSOptimizer:
         trace = [] if self.display else None
         status = None
         accepted_steps = 0
+        gn_diag = None
 
         for _ in range(n_steps):
             # First check whether L-BFGS-B has already reached a point where
@@ -560,6 +642,33 @@ class BFGSOptimizer:
             H_opt = self._gauss_newton_curvature(
                 trial_func, x, prior_precision
             )
+
+            eigvals = np.linalg.eigvalsh(H_opt)
+            gn_min = float(eigvals[0])
+            gn_max = float(eigvals[-1])
+            gn_pd = bool(gn_min > 0.0)
+            gn_condition = (
+                float(gn_max / gn_min) if gn_pd else np.inf
+            )
+            gn_diag = {
+                "min_eig": gn_min,
+                "max_eig": gn_max,
+                "is_positive_definite": gn_pd,
+                "condition_number": gn_condition,
+                "ill_conditioned": bool(
+                    gn_pd
+                    and np.isfinite(gn_condition)
+                    and gn_condition > self.condition_number_warn
+                ),
+            }
+
+            if not gn_pd:
+                status = ConvergenceStatus.SINGULAR_CURVATURE
+                break
+
+            if gn_diag["ill_conditioned"]:
+                status = ConvergenceStatus.ILL_CONDITIONED_CURVATURE
+                break
 
             try:
                 dx = np.linalg.solve(H_opt, g)
@@ -637,7 +746,7 @@ class BFGSOptimizer:
             trace.append((x.copy(), f_current))
             self._temp_polish_trace = trace
 
-        return x, f_current, status, accepted_steps
+        return x, f_current, status, accepted_steps, gn_diag
 
     # -----------------------------------------------------------------
     # Full optimization
@@ -676,10 +785,14 @@ class BFGSOptimizer:
         """
         self.all_results = []
 
-        # Defensive NumPy/scipy wrapper.
+        # Defensive NumPy/scipy wrapper. Invalid-domain evaluations are
+        # retained as diagnostics rather than silently disappearing.
         raw_fun = neg_log_post
+        invalid_evaluations = 0
+        first_invalid_reason = None
 
         def safe_fun(x):
+            nonlocal invalid_evaluations, first_invalid_reason
             with np.errstate(
                 over="ignore",
                 invalid="ignore",
@@ -688,9 +801,23 @@ class BFGSOptimizer:
             ):
                 try:
                     f = float(raw_fun(x))
-                except Exception:
+                except Exception as exc:
+                    invalid_evaluations += 1
+                    if first_invalid_reason is None:
+                        first_invalid_reason = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
                     return 1e20
-            return f if np.isfinite(f) else 1e20
+
+            if not np.isfinite(f):
+                invalid_evaluations += 1
+                if first_invalid_reason is None:
+                    first_invalid_reason = (
+                        "non-finite objective value"
+                    )
+                return 1e20
+
+            return f
 
         init_points = []
 
@@ -724,7 +851,7 @@ class BFGSOptimizer:
 
         n_needed = max(0, self.num_init - len(init_points))
         if n_needed:
-            random_inits = np.random.uniform(
+            random_inits = self.rng.uniform(
                 low=self.range_bounds[0],
                 high=self.range_bounds[1],
                 size=(n_needed, self.d),
@@ -772,6 +899,7 @@ class BFGSOptimizer:
                 best_result.f,
                 status,
                 n_polish_steps,
+                gn_diag,
             ) = self._newton_polish(
                 safe_fun,
                 best_result.x,
@@ -781,6 +909,7 @@ class BFGSOptimizer:
         else:
             status = ConvergenceStatus.SKIPPED_NO_TRIAL_FUNC
             n_polish_steps = 0
+            gn_diag = None
             self._temp_polish_trace = None
 
         if best_result.f > f_before_polish:
@@ -798,6 +927,8 @@ class BFGSOptimizer:
         # -------------------------------------------------------------
         # Independent post-MAP observed Hessian.
         # -------------------------------------------------------------
+        invalid_before_hessian = invalid_evaluations
+
         hess, hess_diag = self.compute_hessian(
             safe_fun,
             best_result.x,
@@ -806,6 +937,9 @@ class BFGSOptimizer:
         )
 
         is_hess_pos = hess_diag["is_positive_definite"]
+        hessian_invalid_evaluations = (
+            invalid_evaluations - invalid_before_hessian
+        )
 
         # -------------------------------------------------------------
         # Diagnostics.
@@ -834,8 +968,21 @@ class BFGSOptimizer:
             )
 
         laplace_valid = bool(
-            is_hess_pos and not np.any(at_hard_bounds)
+            is_hess_pos
+            and not np.any(at_hard_bounds)
+            and hessian_invalid_evaluations == 0
         )
+        laplace_fragile = bool(
+            laplace_valid and hess_diag["ill_conditioned"]
+        )
+
+        if hessian_invalid_evaluations:
+            warnings.warn(
+                "Observed-Hessian estimation encountered "
+                f"{hessian_invalid_evaluations} invalid objective "
+                "evaluation(s). The MAP is retained, but Laplace "
+                "evidence is disabled for this fit."
+            )
 
         if not is_hess_pos:
             warnings.warn(
@@ -846,7 +993,7 @@ class BFGSOptimizer:
             )
 
         condition = hess_diag["condition_number"]
-        if np.isfinite(condition) and condition > 1e12:
+        if hess_diag["ill_conditioned"]:
             warnings.warn(
                 "Observed Hessian is extremely ill-conditioned "
                 f"(condition number={condition:.3e}). "
@@ -857,17 +1004,52 @@ class BFGSOptimizer:
         # Flagging: do not replace a valid MAP with the prior merely
         # because Laplace curvature is problematic.
         # -------------------------------------------------------------
+        flag = 1.0
+
+        if not best_result.success:
+            flag = 0.5
+            warnings.warn(
+                "Winning L-BFGS-B run did not report successful "
+                f"termination (status={best_result.lbfgsb_status}: "
+                f"{best_result.lbfgsb_message}). The finite MAP "
+                "candidate is retained and explicitly flagged."
+            )
+
         if status is ConvergenceStatus.SINGULAR_CURVATURE:
+            flag = 0.5
+            detail = ""
+            if gn_diag is not None:
+                detail = (
+                    f" min_eig={gn_diag['min_eig']:.3e}, "
+                    f"condition={gn_diag['condition_number']:.3e}."
+                )
+            warnings.warn(
+                "GN polish stopped because the optimization curvature "
+                "was not positive definite or could not provide a valid "
+                f"Newton direction.{detail} The best L-BFGS-B/GN point "
+                "is retained."
+            )
+
+        elif status is ConvergenceStatus.ILL_CONDITIONED_CURVATURE:
             flag = 0.5
             warnings.warn(
                 "GN polish stopped because the optimization curvature "
-                "could not provide a valid Newton direction. "
-                "The best L-BFGS-B/GN point is retained."
+                "is ill-conditioned "
+                f"(condition number={gn_diag['condition_number']:.3e}, "
+                f"minimum eigenvalue={gn_diag['min_eig']:.3e}). "
+                "The best L-BFGS-B point is retained."
             )
-        else:
-            flag = 1.0
 
-        if not laplace_valid:
+        if invalid_evaluations:
+            flag = min(flag, 0.5)
+            warnings.warn(
+                f"Objective evaluation was invalid {invalid_evaluations} "
+                "time(s) during optimization/derivative diagnostics. "
+                f"First reason: {first_invalid_reason}. "
+                "The finite MAP is retained."
+            )
+
+        if not laplace_valid or laplace_fragile:
             flag = min(flag, 0.5)
 
         # -------------------------------------------------------------
@@ -907,9 +1089,28 @@ class BFGSOptimizer:
             hess_method=hess_diag["method"],
             convergence_status=status,
             hess_raw_min_eig=hess_diag["raw_min_eig"],
+            hess_raw_max_eig=hess_diag["raw_max_eig"],
             hess_n_clipped=0,
             hess_condition_number=hess_diag["condition_number"],
+            hess_ill_conditioned=hess_diag["ill_conditioned"],
             laplace_valid=laplace_valid,
+            laplace_fragile=laplace_fragile,
+            gn_min_eig=(None if gn_diag is None else gn_diag["min_eig"]),
+            gn_max_eig=(None if gn_diag is None else gn_diag["max_eig"]),
+            gn_condition_number=(
+                None if gn_diag is None else gn_diag["condition_number"]
+            ),
+            gn_is_positive_definite=(
+                None if gn_diag is None else gn_diag["is_positive_definite"]
+            ),
+            gn_ill_conditioned=(
+                None if gn_diag is None else gn_diag["ill_conditioned"]
+            ),
+            lbfgsb_status=best_result.lbfgsb_status,
+            lbfgsb_message=best_result.lbfgsb_message,
+            n_invalid_evaluations=invalid_evaluations,
+            first_invalid_evaluation=first_invalid_reason,
+            hessian_invalid_evaluations=hessian_invalid_evaluations,
             n_inits_agreeing=n_inits_agreeing,
             at_hard_bounds=at_hard_bounds,
             weak_identifiability=None,

@@ -69,62 +69,62 @@ print(binary_fit.output.latent[0].keys())
 
 binary_fit.plot(subject=0)
 
-# # =====================================================================
-# # 2. Categorical RL model: prediction + latent trajectories
-# # =====================================================================
+# =====================================================================
+# 2. Categorical RL model: prediction + latent trajectories
+# =====================================================================
 
-# categorical_data = [
-#     categorical_subject(rng)
-#     for _ in range(5)
-# ]
+categorical_data = [
+    categorical_subject(rng)
+    for _ in range(5)
+]
 
-# categorical_fit = individual_fit(
-#     data=categorical_data,
-#     model=categorical_model,
-#     observation=categorical_observation,
-#     evolution=categorical_evolution,
-#     prior_mean=np.array([0.5, 2.0]),
-#     prior_variance=np.array([1.0, 16.0]),
-#     config=config,
-# )
-
-
-# # =====================================================================
-# # 3. Continuous model: no latent dynamics
-# # =====================================================================
-
-# continuous_data = [
-#     continuous_subject(rng)
-#     for _ in range(5)
-# ]
-
-# continuous_fit = individual_fit(
-#     data=continuous_data,
-#     model=continuous_model,
-#     observation=continuous_observation,
-#     prior_mean=np.array([0.0, 0.0]),
-#     prior_variance=np.array([10.0, 10.0]),
-#     config=config,
-# )
+categorical_fit = individual_fit(
+    data=categorical_data,
+    model=categorical_model,
+    observation=categorical_observation,
+    evolution=categorical_evolution,
+    prior_mean=np.array([0.5, 2.0]),
+    prior_variance=np.array([1.0, 16.0]),
+    config=config,
+)
 
 
-# # =====================================================================
-# # 4. Scalar likelihood: GN unavailable, latent tracking still optional
-# # =====================================================================
+# =====================================================================
+# 3. Continuous model: no latent dynamics
+# =====================================================================
 
-# scalar_config = Config(
-#     d=2,
-#     num_init=5,
-#     verbose=True,
-#     display=False,
-#     hessian_method="central_fd",
-# )
+continuous_data = [
+    continuous_subject(rng)
+    for _ in range(5)
+]
 
-# scalar_fit = individual_fit(
-#     data=continuous_data,
-#     model=continuous_model_scalar,
-#     observation=continuous_observation,
-#     prior_mean=np.array([0.0, 0.0]),
-#     prior_variance=np.array([10.0, 10.0]),
-#     config=scalar_config,
-# )
+continuous_fit = individual_fit(
+    data=continuous_data,
+    model=continuous_model,
+    observation=continuous_observation,
+    prior_mean=np.array([0.0, 0.0]),
+    prior_variance=np.array([10.0, 10.0]),
+    config=config,
+)
+
+
+# =====================================================================
+# 4. Scalar likelihood: GN unavailable, latent tracking still optional
+# =====================================================================
+
+scalar_config = Config(
+    d=2,
+    num_init=5,
+    verbose=True,
+    display=False,
+    hessian_method="central_fd",
+)
+
+scalar_fit = individual_fit(
+    data=continuous_data,
+    model=continuous_model_scalar,
+    observation=continuous_observation,
+    prior_mean=np.array([0.0, 0.0]),
+    prior_variance=np.array([10.0, 10.0]),
+    config=scalar_config,
+)
