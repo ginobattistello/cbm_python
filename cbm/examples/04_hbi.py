@@ -55,16 +55,3 @@ hbi = hbi_main(
     fcbm_maps=[str(map_free), str(map_fixed)],
     config=HBIConfig(verbose=True, maxiter=20),
 )
-
-print("\nmodel frequency:")
-print(hbi.output.model_frequency)
-
-print("\nexceedance probability:")
-print(hbi.output.exceedance_prob)
-
-print("\nprotected exceedance probability:")
-print(hbi.output.protected_exceedance_prob)
-
-print("\ngroup means:")
-for k, mean in enumerate(hbi.output.group_mean, start=1):
-    print(f"model {k}: {mean}")
